@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "mode": "on_demand",
+  "interval": 300,
+  "thresholds": {
+    "cpu_percent": 70,
+    "memory_percent": 75,
+    "disk_percent": 85,
+    "process_count": 200,
+    "network_connections": 100,
+    "power_draw": 15
+  },
+  "optimization_count": 26,
+  "total_power_saved": 1254.5399999999997,
+  "last_updated": "2025-10-14T06:03:07.386759"
+}

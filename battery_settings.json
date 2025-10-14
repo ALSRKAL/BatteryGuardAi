@@ -1,0 +1,44 @@
+{
+  "last_save": "2025-10-14T06:03:29.452190",
+  "settings": {
+    "notify_low_battery": true,
+    "notify_charge_suggested": true,
+    "notify_unplug_suggested": true,
+    "notify_full_charge": true,
+    "enable_notifications": true,
+    "enable_sounds": true,
+    "enable_reminders": true,
+    "battery_thresholds": {
+      "critical_low": 10,
+      "low": 30,
+      "optimal_min": 40,
+      "optimal_max": 80,
+      "high": 90,
+      "full": 95
+    },
+    "smart_alerts": {
+      "charger_disconnect_reminder": true,
+      "optimal_charge_reminder": true,
+      "health_warnings": true,
+      "usage_pattern_alerts": true,
+      "temperature_warnings": true,
+      "ai_recommendations": true
+    },
+    "reminder_intervals": {
+      "battery_critical": 60,
+      "battery_low": 300,
+      "charge_complete": 600,
+      "unplug_charger": 300
+    },
+    "low_battery_threshold": 30,
+    "charge_threshold": 40,
+    "unplug_threshold": 80
+  },
+  "battery_health": {
+    "design_capacity": 6800.0,
+    "full_capacity": 5151.0,
+    "health_percentage": 75,
+    "cycle_count": 228
+  },
+  "total_runtime": 0
+}
