@@ -646,17 +646,18 @@ class AdvancedChargeController:
         try:
             if self.sudo_password:
                 process = subprocess.Popen(
-                    ['sudo', '-S'] + cmd,
+                    ['sudo', '-S', '-p', ''] + cmd,  # -p '' لإخفاء prompt
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True
+                    text=True,
+                    env={**os.environ, 'SUDO_ASKPASS': '/bin/false'}  # منع GUI prompts
                 )
                 stdout, stderr = process.communicate(input=f"{self.sudo_password}\n", timeout=10)
                 return process.returncode == 0
             else:
-                result = subprocess.run(['sudo'] + cmd, capture_output=True, timeout=10)
-                return result.returncode == 0
+                # بدون كلمة مرور، لا نستخدم sudo (لتجنب prompt)
+                return False
         except:
             return False
     
@@ -665,11 +666,12 @@ class AdvancedChargeController:
         try:
             if self.sudo_password:
                 process = subprocess.Popen(
-                    ['sudo', '-S'] + cmd,
+                    ['sudo', '-S', '-p', ''] + cmd,  # -p '' لإخفاء prompt
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True
+                    text=True,
+                    env={**os.environ, 'SUDO_ASKPASS': '/bin/false'}  # منع GUI prompts
                 )
                 stdout, stderr = process.communicate(
                     input=f"{self.sudo_password}\n{input_data}", 
@@ -677,15 +679,8 @@ class AdvancedChargeController:
                 )
                 return process.returncode == 0
             else:
-                process = subprocess.Popen(
-                    ['sudo'] + cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                stdout, stderr = process.communicate(input=input_data, timeout=10)
-                return process.returncode == 0
+                # بدون كلمة مرور، لا نستخدم sudo (لتجنب prompt)
+                return False
         except:
             return False
     

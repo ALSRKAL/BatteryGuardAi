@@ -5,6 +5,7 @@
 import sys
 import os
 import socket
+import zlib
 import logging
 from pathlib import Path
 
@@ -12,6 +13,15 @@ logger = logging.getLogger('BatteryGuard')
 
 IS_WINDOWS = sys.platform == 'win32'
 IS_LINUX = sys.platform.startswith('linux')
+
+
+def _deterministic_port(app_name: str) -> int:
+    """
+    منفذ حتمي من اسم التطبيق.
+    ملاحظة: دالة hash() في Python تختلف بين الجلسات (PYTHONHASHSEED)،
+    لذا استخدمنا CRC32 لضمان ثبات المنفذ عبر عمليات الإعادة التشغيل.
+    """
+    return 50000 + zlib.crc32(app_name.encode('utf-8')) % 10000
 
 
 class SingleInstance:
@@ -23,11 +33,7 @@ class SingleInstance:
         self.is_running = False
         
         # تحديد المنفذ
-        if port:
-            self.port = port
-        else:
-            # استخدام منفذ فريد بناءً على اسم التطبيق
-            self.port = 50000 + hash(app_name) % 10000
+        self.port = port or _deterministic_port(app_name)
         
         # ملف القفل (Lock file)
         if IS_WINDOWS:
@@ -68,7 +74,7 @@ class SingleInstance:
                         with open(self.lock_file, 'r') as f:
                             info = f.read()
                             logger.info(f"معلومات النسخة العاملة: {info}")
-                    except:
+                    except Exception:
                         pass
         
         except Exception as e:
@@ -112,31 +118,43 @@ class SingleInstance:
         
         import threading
         
+        # إشارة إظهار النافذة (تُستقبل في خيط الاستماع وتُعالج بأمان)
+        self.show_requested = False
+        self._callback = callback
+        
         def listen():
             try:
-                while True:
+                while not getattr(self, '_stop_listening', False):
                     try:
                         client, addr = self.socket.accept()
                         data = client.recv(1024)
                         
-                        if data == b'SHOW' and callback:
-                            # استدعاء الدالة لإظهار النافذة
-                            callback()
-                            logger.info("📢 تم استقبال إشارة لإظهار النافذة")
-                        
+                        if data == b'SHOW':
+                            # لا تستدعي دوال الواجهة من هنا مباشرة؛
+                            # ارفع الطلب ليقرر الخيط الرئيسي (انظر main.py)
+                            logger.info("📢 تم استقبال طلب لإظهار النافذة")
+                            if hasattr(self, 'on_show_request'):
+                                try:
+                                    self.on_show_request()
+                                except Exception as e:
+                                    logger.error(f"خطأ في معالج الإظهار: {e}")
                         client.close()
-                    except:
+                    except socket.timeout:
+                        continue
+                    except OSError:
                         break
             except Exception as e:
                 logger.error(f"خطأ في الاستماع: {e}")
         
-        # بدء الاستماع في thread منفصل
+        self.socket.settimeout(1.0)
         listener_thread = threading.Thread(target=listen, daemon=True)
         listener_thread.start()
+        self._listener_thread = listener_thread
     
     def release(self):
         """تحرير القفل"""
         try:
+            self._stop_listening = True
             if self.socket:
                 self.socket.close()
                 self.socket = None
@@ -145,7 +163,7 @@ class SingleInstance:
             if self.lock_file.exists():
                 try:
                     self.lock_file.unlink()
-                except:
+                except Exception:
                     pass
             
             logger.info("✅ تم تحرير القفل")

@@ -39,10 +39,25 @@ class AnimatedBatteryWidget(QWidget):
     def set_battery_level(self, level: int, is_charging: bool):
         """تعيين مستوى البطارية مع أنيميشن"""
         self._is_charging = is_charging
+        if not self.isVisible():
+            # تحديث مباشر بدون أنيميشن عند الإخفاء
+            self.battery_level = level
+            return
         self.fill_animation.stop()
         self.fill_animation.setStartValue(self._battery_level)
         self.fill_animation.setEndValue(level)
         self.fill_animation.start()
+
+    def showEvent(self, event):
+        """استئناف الأنيميشن عند الظهور"""
+        super().showEvent(event)
+        if not self.wave_timer.isActive():
+            self.wave_timer.start(50)
+
+    def hideEvent(self, event):
+        """إيقاف الأنيميشن عند الإخفاء لتوفير المعالج والبطارية"""
+        super().hideEvent(event)
+        self.wave_timer.stop()
     
     def update_wave(self):
         """تحديث موجة الماء"""

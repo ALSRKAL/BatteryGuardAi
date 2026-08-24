@@ -1,541 +1,150 @@
-# 🔋 BatteryGuard Pro - نظام إدارة البطارية الذكي
+# BatteryGuardAI
 
-<div align="center">
+[![Tests](https://github.com/ALSRKAL/BatteryGuardAi/actions/workflows/tests.yml/badge.svg)](https://github.com/ALSRKAL/BatteryGuardAi/actions)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)](#)
+[![Python](https://img.shields.io/badge/python-3.10%2B-green)](#)
+[![License: MIT](https://img.shields.io/badge/license-MIT-orange)](LICENSE)
 
-**نظام متقدم لإدارة البطارية مع ذكاء اصطناعي من الجيل الرابع وتحكم فعلي في الشحن**
-
-[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
-[![PyQt6](https://img.shields.io/badge/PyQt6-6.4+-green.svg)](https://www.riverbankcomputing.com/software/pyqt/)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg)](https://github.com)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
-</div>
+**العربية | [English](#english)**
 
 ---
 
-## 🚀 التشغيل السريع
+## العربية
 
-### Linux
-```bash
-chmod +x start.sh && ./start.sh
-```
+BatteryGuardAI تطبيق مكتبي مفتوح المصدر يحمي بطارية حاسوبك المحمول ويرفع عمرها الافتراضي عبر مراقبة ذكية، تنبؤات زمنية، تحكم فعلي في حدود الشحن (حيث يدعمه العتاد)، وإشعارات تفاعلية قابلة للتخصيص.
 
-### Windows
-```batch
-start.bat
-```
+### المزايا الرئيسية
 
-**أو استخدم:**
-```bash
-python3 start_quick.py  # Linux
-python start_quick.py   # Windows
-```
+- **مراقبة لحظية**: نسبة الشحن، الاستهلاك الفعلي بالواط (على لينكس)، حالة الشاحن.
+- **ذكاء اصطناعي خفيف**: يتعلّم أنماط استخدامك (ساعات الذروة، عادة الشحن، الشحن الليلي) ويتنبأ بالوقت المتبقي بانحدار خطي على آخر القياسات مع مرشّح EWMA — بدون مكتبات تعلم آلي ثقيلة.
+- **تحكم فعلي في الشحن**: ضبط حد شحن أقصى/أدنى (مثال 40–80%) عبر:
+  - **لينكس**: `charge_control_end_threshold` / `charge_start_threshold` (ASUS، ThinkPad، ...) وTLP.
+  - **ويندوز**: أدوات المصنّعين حيث تتوفر (Lenovo Conservation Mode، Dell cctk، HP، ASUS).
+- **إشعارات ذكية**: حدود قابلة للتخصيص، تذكيرات متكررة مع (إيقاف/غفوة/كتم)، ساعات هدوء ليلية، أصوات مخصصة MP3 لكل نوع.
+- **محسّن النظام**: تنظيف الذاكرة والملفات المؤقتة وخفض السطوع عند الحاجة، مع وضع تلقائي أو مجدول.
+- **لوحة إحصائيات**: صحة البطارية الحقيقية من العتاد، دورات الشحن، أوقات الشحن/التفريغ التراكمية.
 
-📖 **للمزيد:** راجع [دليل التشغيل السريع](QUICK_START.md) | [دليل التثبيت الكامل](INSTALL.md)
+### المتطلبات
 
----
+| | |
+|---|---|
+| نظام التشغيل | Windows 10/11 أو Linux (X11/Wayland مع بيئة تدعم الإشعارات) |
+| بايثون | 3.10 أو أحدث |
+| الحزم | `PyQt6`، `psutil` (+ اختيارياً `pygame`، `plyer`) |
 
-## ✨ المميزات الرئيسية
-
-### 🔌 1. التحكم الفعلي في الشحن (الجيل الثاني)
-- ✅ **إيقاف الشحن تلقائياً** عند الوصول للحد الأقصى
-- ✅ **بدء الشحن تلقائياً** عند الانخفاض للحد الأدنى
-- ✅ **حماية متقدمة** من الشحن الزائد والتفريغ العميق
-- ✅ **اكتشاف تلقائي** لجميع طرق التحكم المتاحة
-- ✅ **محاولات متعددة** - يجرب جميع الطرق حتى ينجح
-- ✅ **دعم شامل** لجميع الشركات المصنعة
-
-**الطرق المدعومة:**
-
-#### 🐧 Linux (6 طرق):
-1. **Kernel Threshold** - الأفضل والأكثر موثوقية
-2. **ASUS Battery Health** - لأجهزة ASUS
-3. **ThinkPad Thresholds** - لأجهزة Lenovo ThinkPad
-4. **TLP** - أداة شاملة لإدارة الطاقة
-5. **ACPI Call** - للتحكم المباشر
-6. **Laptop Mode Tools** - أداة بديلة
-
-#### 🪟 Windows (7 طرق):
-1. **ASUS Battery Health** - لأجهزة ASUS
-2. **Lenovo Conservation Mode** - لأجهزة Lenovo
-3. **Dell Power Manager** - لأجهزة Dell
-4. **HP Battery Health** - لأجهزة HP
-5. **MSI Dragon Center** - لأجهزة MSI
-6. **WMI/ACPI** - طريقة عامة
-7. **PowerShell Battery Control** - التحكم عبر الأوامر
-
-### 🤖 2. ذكاء اصطناعي متقدم (الجيل الرابع)
-- 📊 **12 إحصائية متقدمة** - تحليل شامل للبطارية
-- 🎯 **تقدم التعلم** - يتحسن مع الاستخدام
-- 📈 **مستويات النضج** - من مبتدئ إلى خبير
-- 🔬 **تحليل التدهور** - اكتشاف مبكر للمشاكل
-- 🎓 **توصيات ذكية** - مخصصة لنمط استخدامك
-- ⏱️ **توقعات دقيقة** - للوقت المتبقي والاستهلاك
-
-### 📊 3. مراقبة شاملة
-- ⚡ **الوقت الفعلي** - تحديث فوري لجميع البيانات
-- 🔋 **استهلاك الطاقة** - بالواط (Watts)
-- 💚 **صحة البطارية** - نسبة مئوية دقيقة
-- 🔄 **دورات الشحن** - عدد الدورات المكتملة
-- ⚡ **الفولتية والتيار** - قياسات دقيقة
-- 📈 **رسوم بيانية** - تصور واضح للبيانات
-
-### 🔔 4. إشعارات ذكية
-- 🎯 **توقيت ذكي** - لا إزعاج في الأوقات غير المناسبة
-- 📊 **أولويات مختلفة** - حسب أهمية الإشعار
-- 🤖 **تكامل مع AI** - إشعارات مخصصة
-- 🔕 **منع التكرار** - لا إزعاج مستمر
-- 🌍 **دعم متعدد المنصات** - Windows و Linux
-
-### 🚀 5. تحسين الأداء
-- 🧹 **تنظيف الذاكرة** - تحرير RAM تلقائياً
-- ⚡ **تحسين العمليات** - إدارة ذكية للموارد
-- 🌙 **خفض السطوع** - توفير الطاقة
-- 🌐 **إدارة الشبكة** - تحسين الاتصال
-- 💾 **تحسين القرص** - أداء أفضل
-
-### 🎨 6. واجهة عصرية
-- 🎭 **تصميم حديث** - واجهة جذابة وسهلة
-- ✨ **رسوم متحركة** - انتقالات سلسة
-- 🌓 **وضع داكن** - راحة للعين
-- 🔔 **أيقونة ذكية** - في شريط المهام
-- 📊 **معلومات فورية** - عند التمرير بالماوس
-- 🎨 **ألوان ديناميكية** - حسب حالة البطارية
-
----
-
-## 📋 المتطلبات
-
-### الأساسية (مطلوبة)
-- ✅ Python 3.8 أو أحدث
-- ✅ PyQt6 >= 6.4.0
-- ✅ psutil >= 5.9.0
-
-### اختيارية (للتحكم المتقدم)
-
-#### 🐧 Linux:
-- **TLP** - للتحكم الأمثل في الشحن
-  ```bash
-  sudo apt install tlp tlp-rdw
-  ```
-- **acpi-call** - لأجهزة ThinkPad وغيرها
-  ```bash
-  sudo apt install acpi-call-dkms
-  ```
-
-#### 🪟 Windows:
-- **تشغيل كمسؤول** - للحصول على كامل الصلاحيات
-- أدوات الشركة المصنعة (تُكتشف تلقائياً)
-
----
-
-## 🔧 التثبيت والتشغيل
-
-### ⚡ الطريقة السريعة (موصى بها)
-
-#### Linux:
-```bash
-# تحميل المشروع
-git clone <repository-url>
-cd BatteryGuard-Pro
-
-# تشغيل مباشرة (يثبت المتطلبات تلقائياً)
-chmod +x start.sh
-./start.sh
-```
-
-#### Windows:
-```batch
-REM تحميل المشروع
-git clone <repository-url>
-cd BatteryGuard-Pro
-
-REM تشغيل مباشرة (يثبت المتطلبات تلقائياً)
-start.bat
-```
-
-### 📦 الطريقة اليدوية
+### التثبيت والتشغيل
 
 ```bash
-# 1. تثبيت المتطلبات
+git clone https://github.com/ALSRKAL/BatteryGuardAi.git
+cd BatteryGuardAi
 pip install -r requirements.txt
-
-# 2. تشغيل التطبيق
-python3 main.py  # Linux
-python main.py   # Windows
+python main.py            # تشغيل عادي
+python main.py --background   # تشغيل في الخلفية (أيقونة الصينية فقط)
 ```
 
-### 🧪 اختبار نظام التحكم
+### بناء نسخة تنفيذية
+
+راجع [docs/BUILDING.md](docs/BUILDING.md) — يستخدم PyInstaller عبر `build.sh` (لينكس) أو `build.bat` (ويندوز).
+
+### هيكل المشروع
+
+```
+├── main.py                     # نقطة الدخول
+├── main_window.py              # النافذة الرئيسية والتنسيق بين الوحدات
+├── battery_ai.py               # محرك التحليل والتنبؤ (EWMA + انحدار خطي)
+├── monitor_thread.py           # خيط المراقبة (فاصل تكيفي + إيقاف تعاوني)
+├── battery_monitor.py          # قراءة حالة البطارية وصحتها عبر المنصات
+├── notification_manager.py     # الإشعارات والتذكيرات والأصوات
+├── charge_controller.py        # واجهة التحكم في الشحن
+├── charge_control_advanced.py  # التنفيذ الفعلي لحدود الشحن
+├── battery_optimizer.py        # تحسينات النظام اليدوية/التلقائية
+├── auto_optimizer.py           # المحسّن التلقائي في الخلفية
+├── storage.py                  # تخزين JSON ذري آمن بين الخيوط
+├── ui_components.py            # تبويبات الواجهة الأربعة
+└── tests/                      # حزمة اختبارات pytest (75 اختباراً)
+```
+
+### الاختبارات
 
 ```bash
-# اختبار جميع طرق التحكم المتاحة
-python3 test_charge_control.py
+pip install pytest pytest-timeout
+pytest                # كل الاختبارات (تعمل بلا شاشة عبر offscreen)
 ```
 
-📖 **للمزيد من التفاصيل:** راجع [دليل التثبيت الكامل](INSTALL.md)
+تغطي الاختبارات محرك AI (المعدلات، التنبؤ، دورات الشحن)، منطق الإشعارات (التهدئة، الغفوة، الكتم)، التخزين الذري والاسترجاع من ملف تالف، اكتشاف النسخة الواحدة، ودورة حياة كاملة للنافذة.
 
----
+### ملاحظة عن دعم العتاد
 
-## 💡 الاستخدام
+ضبط حدود الشحن يعتمد على دعم الشركة المصنعة. إن لم يتوفر مسار تحكم في جهازك سيعمل التطبيق بوضع الإشعارات فقط ويخبرك بذلك بدلاً من ادعاء نجاح زائف.
 
-### 1️⃣ تفعيل التحكم في الشحن
+## English
 
-1. افتح التطبيق
-2. اذهب إلى تبويب **"التحكم في الشحن"**
-3. حدد **الحد الأدنى** (مثلاً: 40%)
-4. حدد **الحد الأقصى** (مثلاً: 80%)
-5. اضغط **"تفعيل التحكم"**
-6. أدخل كلمة مرور sudo (Linux فقط)
+BatteryGuardAI is an open-source desktop app that protects your laptop battery and extends its lifespan through intelligent monitoring, time-to-empty forecasting, real charge-threshold control (where hardware supports it), and customizable interactive notifications.
 
-**💡 النسب الموصى بها:**
-- الحد الأقصى: **80%** (يطيل عمر البطارية)
-- الحد الأدنى: **40%** (يمنع التفريغ العميق)
+### Key Features
 
-### 2️⃣ مراقبة البطارية
+- **Live monitoring**: charge level, actual power draw in watts (Linux), charger state.
+- **Lightweight AI**: learns your usage patterns (peak hours, charging habits, night usage) and predicts remaining time with linear regression over recent samples plus EWMA smoothing — no heavy ML dependencies.
+- **Real charge control**: set a max/min charge window (e.g. 40–80%) via:
+  - **Linux**: `charge_control_end_threshold` / `charge_start_threshold` (ASUS, ThinkPad, ...) and TLP.
+  - **Windows**: vendor tools where available (Lenovo Conservation Mode, Dell cctk, HP, ASUS).
+- **Smart notifications**: customizable thresholds, recurring reminders with Stop/Snooze/Mute, quiet hours, per-type custom MP3 sounds.
+- **System optimizer**: memory/temp-file cleanup and brightness reduction when needed, manual or automatic.
+- **Statistics dashboard**: real hardware battery health, cycle count, cumulative charge/discharge times.
 
-- يعرض التطبيق معلومات فورية عن البطارية
-- رسومات بيانية للاستهلاك
-- توقعات الوقت المتبقي
-- تحليل صحة البطارية
+### Requirements
 
-### 3️⃣ الذكاء الاصطناعي
+| | |
+|---|---|
+| OS | Windows 10/11 or Linux (X11/Wayland with a notification daemon) |
+| Python | 3.10+ |
+| Packages | `PyQt6`, `psutil` (+ optional `pygame`, `plyer`) |
 
-- يتعلم من أنماط استخدامك تلقائياً
-- يقدم توصيات ذكية مخصصة
-- يحلل صحة البطارية بدقة
-- يتحسن مع الاستخدام
-
----
-
-## 🔐 الصلاحيات
-
-### 🐧 Linux
-
-**الطريقة 1: إدخال كلمة المرور (الأسهل)**
-- سيطلب التطبيق كلمة مرور sudo عند الحاجة
-- لن يتم حفظها على القرص (آمن)
-
-**الطريقة 2: إعداد sudoers (متقدم)**
-```bash
-sudo visudo
-# أضف (استبدل USERNAME):
-USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tlp, /usr/bin/tee
-```
-
-### 🪟 Windows
-
-- انقر بزر الماوس الأيمن على `start.bat`
-- اختر **"تشغيل كمسؤول"**
-
----
-
-## 🔌 كيف يعمل التحكم في الشحن؟
-
-### المبدأ
-1. **اكتشاف تلقائي** - يكتشف التطبيق جميع الطرق المتاحة على جهازك
-2. **محاولة متعددة** - يحاول جميع الطرق المتاحة حتى ينجح
-3. **إشعارات ذكية** - إذا فشلت جميع الطرق، يرسل إشعارات للمستخدم
-
-### التقنيات المستخدمة
-
-#### 🐧 Linux:
-```bash
-# 1. Kernel Threshold (الأفضل)
-/sys/class/power_supply/BAT0/charge_control_end_threshold
-
-# 2. TLP
-tlp setcharge 40 80 BAT0
-
-# 3. ASUS Battery Health
-/sys/class/power_supply/BAT0/charge_control_start_threshold
-
-# 4. ACPI Call
-echo "\_SB.PCI0.LPCB.EC0.HKEY.BCSG 1" > /proc/acpi/call
-```
-
-#### 🪟 Windows:
-- **Registry Keys** - لأجهزة Lenovo
-- **WMI/ACPI** - طريقة عامة
-- **PowerShell** - التحكم عبر الأوامر
-- **أدوات الشركات** - ASUS, Dell, HP, MSI
-
----
-
-## ❓ الأسئلة الشائعة
-
-<details>
-<summary><b>❓ هل التحكم في الشحن آمن؟</b></summary>
-
-✅ **نعم، آمن تماماً!**
-- يستخدم واجهات النظام الرسمية
-- لا يعدل على BIOS أو Firmware
-- مستخدم من قبل آلاف المستخدمين
-- مفتوح المصدر - يمكنك مراجعة الكود
-
-</details>
-
-<details>
-<summary><b>❓ لماذا لا يعمل التحكم في الشحن؟</b></summary>
-
-**قد تحتاج إلى:**
-
-🐧 **Linux:**
-1. صلاحيات sudo
-2. تثبيت TLP: `sudo apt install tlp tlp-rdw`
-3. التحقق من دعم جهازك: `python3 test_charge_control.py`
-
-🪟 **Windows:**
-1. تشغيل كمسؤول
-2. تثبيت أدوات الشركة المصنعة
-3. تحديث تعريفات البطارية
-
-**إذا فشلت جميع الطرق:**
-- سيستخدم التطبيق الإشعارات الذكية
-- ستتلقى تنبيهات لفصل/توصيل الشاحن يدوياً
-
-</details>
-
-<details>
-<summary><b>❓ ما هي النسب المثالية للشحن؟</b></summary>
-
-**النسب الموصى بها:**
-- 🔋 الحد الأقصى: **80%**
-- 🔋 الحد الأدنى: **40%**
-
-**لماذا؟**
-- يطيل عمر البطارية بنسبة **2-3 أضعاف**
-- يمنع الشحن الزائد والتفريغ العميق
-- موصى به من قبل جميع الشركات المصنعة
-
-**للاستخدام اليومي:**
-- احتفظ بالبطارية بين 40%-80%
-- للتخزين الطويل: 50%-60%
-
-</details>
-
-<details>
-<summary><b>❓ هل يعمل على جميع الأجهزة؟</b></summary>
-
-**✅ يعمل على معظم الأجهزة:**
-- Lenovo (ThinkPad, IdeaPad)
-- ASUS (ROG, TUF, ZenBook)
-- Dell (XPS, Latitude, Inspiron)
-- HP (EliteBook, ProBook, Pavilion)
-- MSI (Gaming Laptops)
-- وغيرها...
-
-**⚠️ قد لا يعمل التحكم الكامل على:**
-- بعض الأجهزة القديمة جداً
-- أجهزة بدون دعم من الشركة المصنعة
-- لكن ستعمل الإشعارات الذكية على جميع الأجهزة
-
-**🧪 للتحقق من جهازك:**
-```bash
-python3 test_charge_control.py
-```
-
-</details>
-
-<details>
-<summary><b>❓ هل يستهلك موارد النظام؟</b></summary>
-
-**لا، استهلاك منخفض جداً:**
-- 💾 الذاكرة: ~50-80 MB
-- ⚡ المعالج: <1%
-- 🔋 البطارية: تأثير ضئيل جداً
-
-**بل يوفر الطاقة:**
-- تحسين إدارة البطارية
-- منع الشحن الزائد
-- تحسين الأداء العام
-
-</details>
-
-<details>
-<summary><b>❓ هل البيانات آمنة وخاصة؟</b></summary>
-
-**✅ نعم، خصوصية كاملة:**
-- 🔒 جميع البيانات محلية (لا إنترنت)
-- 🔒 لا يتم إرسال أي شيء لأي خادم
-- 🔒 كلمة مرور sudo لا تُحفظ على القرص
-- 🔒 مفتوح المصدر - يمكنك مراجعة الكود
-
-</details>
-
----
-
-## 📁 هيكل المشروع
-
-```
-BatteryGuard-Pro/
-│
-├── 🚀 ملفات التشغيل
-│   ├── start_quick.py              # مشغل سريع متعدد المنصات
-│   ├── start.sh                    # سكريبت Linux
-│   ├── start.bat                   # سكريبت Windows
-│   └── test_charge_control.py      # اختبار نظام التحكم
-│
-├── 🎯 الملفات الرئيسية
-│   ├── main.py                     # نقطة الدخول
-│   ├── main_window.py              # النافذة الرئيسية
-│   ├── battery_monitor.py          # مراقب البطارية
-│   └── monitor_thread.py           # خيط المراقبة
-│
-├── 🔌 نظام التحكم في الشحن
-│   ├── charge_controller.py        # النظام الأساسي
-│   ├── charge_control_advanced.py  # النظام المتقدم (الجيل الثاني)
-│   └── permission_manager.py       # إدارة الصلاحيات
-│
-├── 🤖 الذكاء الاصطناعي
-│   ├── battery_ai.py               # محرك AI (الجيل الرابع)
-│   ├── battery_ai_data.json        # بيانات التعلم
-│   └── battery_optimizer.py        # محسّن الأداء
-│
-├── 🔔 الإشعارات والواجهة
-│   ├── notification_manager.py     # نظام الإشعارات الذكية
-│   ├── tray_icon.py                # أيقونة شريط المهام
-│   ├── ui_components_fixed.py      # مكونات الواجهة
-│   └── battery_widget.py           # عنصر عرض البطارية
-│
-├── 📚 الوثائق
-│   ├── README.md                   # هذا الملف
-│   ├── QUICK_START.md              # دليل التشغيل السريع
-│   ├── INSTALL.md                  # دليل التثبيت الكامل
-│   └── NOTIFICATIONS.md            # وثائق الإشعارات
-│
-└── 📋 الإعدادات
-    ├── requirements.txt            # المكتبات المطلوبة
-    └── battery_events.log          # سجل الأحداث
-```
-
----
-
-## 🛠️ استكشاف الأخطاء
-
-### المشكلة: "فشل TLP - تحقق من التثبيت والصلاحيات"
+### Install & Run
 
 ```bash
-# تثبيت TLP
-sudo apt install tlp tlp-rdw
-sudo tlp start
-
-# التحقق من الحالة
-sudo tlp-stat -b
+git clone https://github.com/ALSRKAL/BatteryGuardAi.git
+cd BatteryGuardAi
+pip install -r requirements.txt
+python main.py                 # normal start
+python main.py --background    # tray-only background start
 ```
 
-### المشكلة: "لا توجد طريقة تحكم متاحة"
+### Building a Binary
+
+See [docs/BUILDING.md](docs/BUILDING.md) — PyInstaller via `build.sh` (Linux) or `build.bat` (Windows).
+
+### Project Layout
+
+```
+├── main.py                     # Entry point
+├── main_window.py              # Main window & module wiring
+├── battery_ai.py               # Analysis/prediction engine (EWMA + linear regression)
+├── monitor_thread.py           # Monitor loop (adaptive interval, cooperative stop)
+├── battery_monitor.py          # Cross-platform battery status & health reader
+├── notification_manager.py     # Notifications, reminders & sounds
+├── charge_controller.py        # Charge-control facade
+├── charge_control_advanced.py  # Actual threshold implementations
+├── battery_optimizer.py        # Manual system optimizations
+├── auto_optimizer.py           # Background automatic optimizer
+├── storage.py                  # Thread-safe atomic JSON storage
+├── ui_components.py            # The four UI tabs
+└── tests/                      # pytest suite (75 tests)
+```
+
+### Running Tests
 
 ```bash
-# اختبار جميع الطرق المتاحة
-python3 test_charge_control.py
-
-# التحقق من دعم kernel
-ls -la /sys/class/power_supply/BAT0/
+pip install pytest pytest-timeout
+pytest    # runs fully headless (Qt offscreen)
 ```
 
-### المشكلة: "Permission denied"
+Coverage includes the AI engine (rates, predictions, cycle counting), notification logic (cooldowns, snooze, mute), atomic storage & corrupt-file recovery, single-instance detection, and a full window lifecycle smoke test.
 
-**Linux:**
-```bash
-# إضافة المستخدم إلى sudo
-sudo usermod -aG sudo $USER
+### Hardware Support Note
 
-# أو تشغيل مع sudo
-sudo python3 main.py
-```
+Charge-limit control depends on vendor support. If your device exposes no control path, the app falls back to notifications-only mode and tells you so instead of pretending success.
 
-**Windows:**
-- انقر بزر الماوس الأيمن على `start.bat`
-- اختر "تشغيل كمسؤول"
+## License
 
-📖 **للمزيد:** راجع [دليل التثبيت](INSTALL.md)
-
----
-
-## 🤝 المساهمة
-
-نرحب بمساهماتك! يمكنك:
-
-- 🐛 **الإبلاغ عن الأخطاء** - افتح Issue
-- 💡 **اقتراح ميزات** - شاركنا أفكارك
-- 🔧 **تحسين الكود** - افتح Pull Request
-- 🌍 **الترجمة** - ساعد في ترجمة التطبيق
-- 📖 **تحسين الوثائق** - اجعلها أفضل
-
-### خطوات المساهمة:
-
-1. Fork المشروع
-2. أنشئ فرع للميزة (`git checkout -b feature/AmazingFeature`)
-3. Commit التغييرات (`git commit -m 'Add some AmazingFeature'`)
-4. Push للفرع (`git push origin feature/AmazingFeature`)
-5. افتح Pull Request
-
----
-
-## 📊 الإحصائيات
-
-- ✅ **13+ طريقة تحكم** مختلفة
-- ✅ **12 إحصائية AI** متقدمة
-- ✅ **6 أنظمة رئيسية** متكاملة
-- ✅ **دعم 10+ شركات** مصنعة
-- ✅ **2 منصة** (Windows & Linux)
-
----
-
-## 📞 الدعم والتواصل
-
-### الحصول على المساعدة
-
-1. **راجع الوثائق:**
-   - [دليل التشغيل السريع](QUICK_START.md)
-   - [دليل التثبيت الكامل](INSTALL.md)
-   - [الأسئلة الشائعة](#-الأسئلة-الشائعة)
-
-2. **اختبر النظام:**
-   ```bash
-   python3 test_charge_control.py
-   ```
-
-3. **راجع السجل:**
-   ```bash
-   cat battery_events.log
-   ```
-
-4. **افتح Issue** على GitHub
-
----
-
-## 📄 الترخيص
-
-هذا المشروع مرخص تحت **MIT License** - راجع ملف [LICENSE](LICENSE) للتفاصيل.
-
----
-
-## 🙏 شكر وتقدير
-
-- **PyQt6** - للواجهة الرسومية الرائعة
-- **psutil** - لمراقبة النظام
-- **TLP** - لإدارة الطاقة على Linux
-- **المجتمع** - لجميع المساهمات والاقتراحات
-
----
-
-## 🌟 ادعمنا
-
-إذا أعجبك المشروع:
-- ⭐ ضع نجمة على GitHub
-- 🔄 شارك المشروع مع الآخرين
-- 💬 أخبرنا عن تجربتك
-- 🤝 ساهم في التطوير
-
----
-
-<div align="center">
-
-**🔋 استمتع بتجربة إدارة بطارية ذكية! ✨**
-
-صُنع بـ ❤️ للحفاظ على صحة بطاريتك
-
-[⬆ العودة للأعلى](#-batteryguard-pro---نظام-إدارة-البطارية-الذكي)
-
-</div>
+MIT — see [LICENSE](LICENSE).

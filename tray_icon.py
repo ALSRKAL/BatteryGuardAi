@@ -21,14 +21,19 @@ class BatteryTrayIcon:
         self.is_charging = False
         self.health_score = 100
         
+        # ذاكرة مؤقتة للأيقونات حسب (شريحة النسبة، حالة الشحن)
+        # لتجنب إعادة الرسم الكامل كل ثانيتين
+        self._icon_cache = {}
+        
         self.create_menu()
         self.update_icon(0, False)
         self.tray_icon.activated.connect(self.on_activated)
         self.tray_icon.show()
     
     def create_menu(self):
-        """إنشاء قائمة محسّنة"""
-        menu = QMenu()
+        """إنشاء القائمة - يجب الاحتفاظ بمرجعها حتى لا يدمّرها جامع النفايات"""
+        self.menu = QMenu(self.parent)
+        menu = self.menu
         
         # عرض النافذة
         show_action = menu.addAction("🔋 عرض النافذة")
@@ -61,12 +66,40 @@ class BatteryTrayIcon:
         self.tray_icon.setContextMenu(menu)
     
     def update_icon(self, percent: int, is_charging: bool, health: int = 100):
-        """تحديث الأيقونة مع رسومات محسّنة"""
+        """تحديث الأيقونة مع تخزين مؤقت حسب (شريحة النسبة، الشحن)"""
         self.current_percent = percent
         self.is_charging = is_charging
         self.health_score = health
         
-        # حجم أكبر للوضوح
+        # شريحة 5% تكفي للتمييز البصري وتزيد نسبة إصابة الكاش
+        cache_key = (percent // 5, bool(is_charging))
+        
+        if cache_key not in self._icon_cache:
+            pixmap = self._render_battery_pixmap(percent, is_charging)
+            self._icon_cache[cache_key] = QIcon(pixmap)
+            # منع نمو الكاش بلا حدود
+            if len(self._icon_cache) > 60:
+                self._icon_cache.clear()
+                self._icon_cache[cache_key] = QIcon(pixmap)
+        
+        icon = self._icon_cache[cache_key]
+        self.tray_icon.setIcon(icon)
+        
+        # تحديث التلميح المحسّن
+        status = "⚡ جارٍ الشحن" if is_charging else "🔋 يعمل على البطارية"
+        health_status = f"💚 الصحة: {health}%"
+        tooltip = f"BatteryGuard Pro\n{percent}% - {status}\n{health_status}"
+        self.tray_icon.setToolTip(tooltip)
+        
+        # تحديث القائمة
+        if hasattr(self, 'status_action'):
+            self.status_action.setText(f"📊 الحالة: {percent}% - {status}")
+        if hasattr(self, 'health_action'):
+            health_emoji = "💚" if health >= 80 else "💛" if health >= 60 else "❤️"
+            self.health_action.setText(f"{health_emoji} الصحة: {health}%")
+    
+    def _render_battery_pixmap(self, percent: int, is_charging: bool) -> QPixmap:
+        """رسم أيقونة البطارية"""
         size = 128
         pixmap = QPixmap(size, size)
         pixmap.fill(Qt.GlobalColor.transparent)
@@ -151,29 +184,14 @@ class BatteryTrayIcon:
                            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight, "⚡")
         
         # مؤشر الصحة (إذا كانت منخفضة)
-        if health < 80:
+        if self.health_score < 80:
             painter.setPen(QColor(239, 68, 68))
             painter.setFont(QFont("Arial", 24, QFont.Weight.Bold))
             painter.drawText(0, 0, size, size, 
                            Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft, "⚠")
         
         painter.end()
-        
-        icon = QIcon(pixmap)
-        self.tray_icon.setIcon(icon)
-        
-        # تحديث التلميح المحسّن
-        status = "⚡ جارٍ الشحن" if is_charging else "🔋 يعمل على البطارية"
-        health_status = f"💚 الصحة: {health}%"
-        tooltip = f"BatteryGuard Pro\n{percent}% - {status}\n{health_status}"
-        self.tray_icon.setToolTip(tooltip)
-        
-        # تحديث القائمة
-        if hasattr(self, 'status_action'):
-            self.status_action.setText(f"📊 الحالة: {percent}% - {status}")
-        if hasattr(self, 'health_action'):
-            health_emoji = "💚" if health >= 80 else "💛" if health >= 60 else "❤️"
-            self.health_action.setText(f"{health_emoji} الصحة: {health}%")
+        return pixmap
     
     def update_time_remaining(self, time_str: str):
         """تحديث الوقت المتبقي في القائمة"""

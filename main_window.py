@@ -18,7 +18,7 @@ from battery_monitor import BatteryMonitor
 from battery_ai import BatteryAI
 from notification_manager import SmartNotificationManager
 from monitor_thread import MonitorThread
-from ui_components_fixed import StatusTab, SettingsTab, AITab, StatsTab
+from ui_components import StatusTab, SettingsTab, AITab, StatsTab
 from tray_icon import BatteryTrayIcon
 from battery_optimizer import BatteryOptimizer
 from permission_manager import PermissionManager
@@ -480,7 +480,7 @@ class ModernUI(QMainWindow):
             if hasattr(self, 'header_battery_widget'):
                 self.header_battery_widget.update()
         
-        # تحديث أيقونة الصينية مع الصحة
+        # تحديث أيقونة الصينية مع الصحة (قراءة واحدة مع تخزين مؤقت داخلي)
         health_info = self.monitor.get_battery_health()
         health_percent = health_info['health_percentage']
         self.tray.update_icon(percent, is_charging, health_percent)
@@ -548,9 +548,7 @@ class ModernUI(QMainWindow):
                     }
                 """)
         
-        # تحديث معلومات الصحة
-        health_info = self.monitor.get_battery_health()
-        health_percent = health_info['health_percentage']
+        # تحديث معلومات الصحة (إعادة استخدام نفس القراءة المخزنة مؤقتاً)
         self.health_label.setText(f"{health_percent}%")
         
         # لون حسب الصحة
@@ -665,11 +663,16 @@ class ModernUI(QMainWindow):
             battery_status['is_charging']
         )
         
-        # إرسال توصية ذكية إذا كانت مهمة
+        # إرسال توصية ذكية إذا كانت مهمة (دائماً حتى مع إخفاء التبويب)
         if recommendations and hasattr(self, 'notification_manager'):
             first_rec = recommendations[0]
             if '🚨' in first_rec or '⚠️' in first_rec:
                 self.notification_manager.send_ai_recommendation(first_rec, priority=8)
+        
+        # تحديث عناصر واجهة تبويب AI فقط عند ظهوره (توفير رسم ومعالجة نصوص)
+        ai_tab_visible = self.tabs.currentWidget() is self.ai_tab
+        if not ai_tab_visible:
+            return
         
         if recommendations:
             text = "🎯 التوصيات الذكية:\n\n"
@@ -794,10 +797,37 @@ class ModernUI(QMainWindow):
     
     def save_all_settings(self):
         """حفظ جميع الإعدادات (موحد)"""
-        # حفظ إعدادات الإشعارات
         settings = self.get_current_settings()
-        for key, value in settings.items():
-            self.settings.setValue(key, value)
+        
+        # حدود البطارية: نفس مفاتيح القراءة في load_settings
+        # (المفتاح = اسم العنصر مع استبدال _spin بـ _threshold)
+        thresholds = settings.get('battery_thresholds', {})
+        threshold_keys = {
+            'critical_low': ('critical_battery_threshold', 10),
+            'low': ('low_battery_threshold', 20),
+            'optimal_min': ('optimal_min_threshold', 40),
+            'optimal_max': ('optimal_max_threshold', 80),
+            'high': ('high_battery_threshold', 90),
+            'full': ('full_battery_threshold', 95),
+        }
+        for tkey, (skey, default) in threshold_keys.items():
+            self.settings.setValue(skey, thresholds.get(tkey, default))
+        
+        # التنبيهات الذكية: نفس مفاتيح القراءة
+        smart_alerts = settings.get('smart_alerts', {})
+        for alert_type, enabled in smart_alerts.items():
+            self.settings.setValue(alert_type, bool(enabled))
+        
+        # فترات التذكير بالدقائق: نفس مفاتيح القراءة
+        intervals = settings.get('reminder_intervals', {})
+        interval_keys = {
+            'battery_critical': ('battery_critical_interval', 1),
+            'battery_low': ('battery_low_interval', 5),
+            'charge_complete': ('charge_complete_interval', 10),
+            'unplug_charger': ('unplug_charger_interval', 5),
+        }
+        for ikey, (skey, default_min) in interval_keys.items():
+            self.settings.setValue(skey, int(intervals.get(ikey, default_min * 60) // 60))
         
         # حفظ إعدادات عامة
         if hasattr(self, 'start_on_boot'):
@@ -1204,7 +1234,8 @@ class ModernUI(QMainWindow):
                 self.start_on_boot.blockSignals(False)
             
             if hasattr(self, 'minimize_to_tray'):
-                self.minimize_to_tray.setChecked(self.settings.value('minimize_to_tray', True, type=bool))
+                # متوافق مع default_settings.py (False افتراضياً)
+                self.minimize_to_tray.setChecked(self.settings.value('minimize_to_tray', False, type=bool))
             if hasattr(self, 'show_battery_in_tray'):
                 self.show_battery_in_tray.setChecked(self.settings.value('show_battery_in_tray', True, type=bool))
             
@@ -1274,16 +1305,19 @@ class ModernUI(QMainWindow):
         log_message = f"[{timestamp}] {message}"
         
         # إضافة في البداية بدلاً من النهاية
-        current_text = self.events_log.toPlainText()
-        if current_text:
-            self.events_log.setPlainText(log_message + "\n" + current_text)
-        else:
-            self.events_log.setPlainText(log_message)
+        cursor = self.events_log.textCursor()
+        cursor.movePosition(cursor.MoveOperation.Start)
+        cursor.insertText(log_message + "\n")
         
         # الاحتفاظ بآخر 500 سطر فقط
-        lines = self.events_log.toPlainText().split('\n')
-        if len(lines) > 500:
-            self.events_log.setPlainText('\n'.join(lines[:500]))
+        doc = self.events_log.document()
+        if doc.blockCount() > 500:
+            # حذف الأسطر الزائدة من النهاية دفعة واحدة
+            cursor.movePosition(cursor.MoveOperation.End)
+            while doc.blockCount() > 500:
+                cursor.movePosition(cursor.MoveOperation.PreviousBlock, cursor.MoveMode.KeepAnchor, 1)
+                cursor.removeSelectedText()
+                cursor.movePosition(cursor.MoveOperation.End)
         
         # حفظ السجل في ملف
         self._save_log_to_file(log_message)
@@ -1291,39 +1325,38 @@ class ModernUI(QMainWindow):
         logger.info(message)
     
     def _save_log_to_file(self, log_message: str):
-        """حفظ السجل في ملف"""
+        """حفظ السجل في ملف (إلحاق سريع بدل إعادة كتابة الملف كاملاً)"""
         try:
-            log_file = Path('battery_events.log')
+            from resource_path import get_data_path
             
-            # قراءة السجل الحالي
-            if log_file.exists():
+            log_file = get_data_path('battery_events.log')
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            # إلحاق السطر الجديد فقط (O(1)) بدل قراءة وكتابة كل السجل
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(log_message + '\n')
+            
+            # تقليم الملف دورياً (كل 200 حدث) للحفاظ على حجمه معقولاً
+            self._log_write_count = getattr(self, '_log_write_count', 0) + 1
+            if self._log_write_count % 200 == 0:
                 with open(log_file, 'r', encoding='utf-8') as f:
                     lines = f.readlines()
-            else:
-                lines = []
-            
-            # إضافة السجل الجديد في البداية
-            lines.insert(0, log_message + '\n')
-            
-            # الاحتفاظ بآخر 1000 سطر
-            if len(lines) > 1000:
-                lines = lines[:1000]
-            
-            # حفظ السجل
-            with open(log_file, 'w', encoding='utf-8') as f:
-                f.writelines(lines)
+                if len(lines) > 1000:
+                    with open(log_file, 'w', encoding='utf-8') as f:
+                        f.writelines(lines[-1000:])
         except Exception as e:
             logger.error(f"خطأ في حفظ السجل: {e}")
     
     def _load_log_from_file(self):
-        """تحميل السجل من الملف"""
+        """تحميل آخر الأحداث من الملف"""
         try:
-            log_file = Path('battery_events.log')
+            from resource_path import get_data_path
+            log_file = get_data_path('battery_events.log')
             if log_file.exists():
                 with open(log_file, 'r', encoding='utf-8') as f:
                     lines = f.readlines()
-                    # عرض آخر 100 سطر فقط
-                    self.events_log.setPlainText(''.join(lines[:100]))
+                    # عرض آخر 100 سطر (الملف يُلحق بالترتيب)
+                    self.events_log.setPlainText(''.join(lines[-100:]))
         except Exception as e:
             logger.error(f"خطأ في تحميل السجل: {e}")
     
@@ -1342,10 +1375,11 @@ class ModernUI(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             try:
                 self.events_log.clear()
-                log_file = Path('battery_events.log')
+                from resource_path import get_data_path
+                log_file = get_data_path('battery_events.log')
                 if log_file.exists():
                     log_file.unlink()
-                self.log_event("✅ تم مسح السجل بنجاح")
+                self._log_write_count = 0
                 logger.info("تم مسح سجل الأحداث")
             except Exception as e:
                 logger.error(f"خطأ في مسح السجل: {e}")
@@ -1367,11 +1401,9 @@ class ModernUI(QMainWindow):
         
         if reply == QMessageBox.StandardButton.Yes:
             try:
-                ai_file = Path('battery_ai_data.json')
-                if ai_file.exists():
-                    ai_file.unlink()
-                from battery_ai import BatteryAI
-                self.ai = BatteryAI()
+                # تصفير داخل نفس الكائن حتى تبقى مراجع خيط المراقبة
+                # والمحسّنات صالحة (استبدال الكائن كان يُحيي البيانات القديمة)
+                self.ai.reset()
                 
                 # تحديث الواجهة
                 if hasattr(self, 'recommendations_text'):
@@ -1385,37 +1417,10 @@ class ModernUI(QMainWindow):
             except Exception as e:
                 logger.error(f"خطأ في إعادة تعيين AI: {e}")
                 QMessageBox.warning(self, "خطأ", f"فشل إعادة تعيين AI: {e}")
-            try:
-                # حذف ملف بيانات AI
-                ai_file = Path('battery_ai_data.json')
-                if ai_file.exists():
-                    ai_file.unlink()
-                
-                # إعادة تهيئة AI
-                from battery_ai import BatteryAI
-                self.ai = BatteryAI()
-                
-                # تحديث الواجهة
-                if hasattr(self, 'recommendations_text'):
-                    self.recommendations_text.setPlainText("تم إعادة التعيين. جارٍ التعلم من جديد...")
-                if hasattr(self, 'prediction_text'):
-                    self.prediction_text.setText("تم إعادة التعيين. جارٍ جمع بيانات جديدة...")
-                
-                self.log_event("✅ تم إعادة تعيين بيانات الذكاء الاصطناعي بنجاح")
-                logger.info("تم إعادة تعيين بيانات AI")
-                
-                QMessageBox.information(
-                    self,
-                    "نجح",
-                    "تم إعادة تعيين بيانات الذكاء الاصطناعي.\nسيبدأ التعلم من جديد."
-                )
-            except Exception as e:
-                logger.error(f"خطأ في إعادة تعيين AI: {e}")
-                QMessageBox.warning(self, "خطأ", f"فشل إعادة تعيين AI: {e}")
     
     def closeEvent(self, event):
         """معالجة إغلاق النافذة"""
-        if self.minimize_to_tray.isChecked():
+        if getattr(self, 'minimize_to_tray', None) and self.minimize_to_tray.isChecked():
             event.ignore()
             self.hide()
             self.tray.show_message(
@@ -1423,11 +1428,15 @@ class ModernUI(QMainWindow):
                 "البرنامج لا يزال يعمل في الخلفية"
             )
         else:
+            event.accept()
             self.quit_application()
     
     def _update_advanced_stats(self):
-        """تحديث الإحصائيات المتقدمة"""
+        """تحديث الإحصائيات المتقدمة - يُنفذ فقط عند ظهور تبويب الإحصائيات
+        لتجنب مسح سجل كامل (آلاف العينات) كل ثانيتين دون حاجة"""
         if not hasattr(self, 'total_charge_time_label'):
+            return
+        if not hasattr(self, 'stats_tab') or self.tabs.currentWidget() is not self.stats_tab:
             return
         
         # حساب أوقات الشحن والاستخدام
@@ -1507,7 +1516,8 @@ class ModernUI(QMainWindow):
         from PyQt6.QtCore import QThread, pyqtSignal
         
         class IntelligentOptimizationThread(QThread):
-            finished = pyqtSignal(dict)
+            # ملاحظة: لا نسمّيه finished حتى لا يظلّل إشارة QThread الأصلية
+            optimization_done = pyqtSignal(dict)
             progress = pyqtSignal(str)
             
             def __init__(self, optimizer, ai_engine):
@@ -1526,10 +1536,10 @@ class ModernUI(QMainWindow):
                 )
                 
                 self.progress.emit("✅ اكتمل التحليل الذكي")
-                self.finished.emit(result)
+                self.optimization_done.emit(result)
         
         self.opt_thread = IntelligentOptimizationThread(self.optimizer, self.ai)
-        self.opt_thread.finished.connect(self._on_intelligent_optimization_complete)
+        self.opt_thread.optimization_done.connect(self._on_intelligent_optimization_complete)
         self.opt_thread.progress.connect(self._on_optimization_progress)
         self.opt_thread.start()
     
@@ -1659,35 +1669,28 @@ class ModernUI(QMainWindow):
             logger.error(f"خطأ في تصدير السجل: {e}")
     
     def _auto_save_data(self):
-        """حفظ تلقائي للبيانات المهمة"""
+        """حفظ تلقائي دوري لبيانات التعلم فقط.
+        ملاحظة: الإعدادات تُحفظ في QSettings عند الضغط على حفظ،
+        ولم نعد نكتب battery_settings.json في مجلد العمل لأنه كان
+        يتعارض مع ملف الإعدادات الرسمي في مجلد بيانات المستخدم."""
         try:
-            # حفظ بيانات AI
             self.ai.save_learning_data()
-            
-            # حفظ الإعدادات
-            settings_data = {
-                'last_save': datetime.now().isoformat(),
-                'settings': self.get_current_settings(),
-                'battery_health': self.monitor.get_battery_health(),
-                'total_runtime': getattr(self, 'total_runtime', 0)
-            }
-            
-            with open('battery_settings.json', 'w', encoding='utf-8') as f:
-                json.dump(settings_data, f, ensure_ascii=False, indent=2)
-            
-            logger.debug("تم الحفظ التلقائي للبيانات")
+            logger.debug("تم الحفظ التلقائي لبيانات AI")
         except Exception as e:
             logger.error(f"خطأ في الحفظ التلقائي: {e}")
     
     def quit_application(self):
-        """إنهاء البرنامج بشكل كامل بسرعة"""
-        from PyQt6.QtWidgets import QProgressDialog
-        from PyQt6.QtCore import Qt
+        """إنهاء البرنامج بشكل كامل ونظيف"""
+        if getattr(self, '_quitting', False):
+            return
+        self._quitting = True
         
-        # عرض مؤشر الإغلاق
-        progress = QProgressDialog("جارٍ إغلاق التطبيق...", None, 0, 4, self)
+        from PyQt6.QtWidgets import QProgressDialog
+        from PyQt6.QtCore import Qt as QtCore
+        
+        progress = QProgressDialog("جارٍ إغلاق التطبيق...", None, 0, 5, self)
         progress.setWindowTitle("BatteryGuard Pro")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setWindowModality(QtCore.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
         progress.setValue(0)
         progress.show()
@@ -1695,39 +1698,46 @@ class ModernUI(QMainWindow):
         
         self.log_event("إيقاف البرنامج...")
         
-        # إيقاف المؤقتات
+        # 1) إيقاف المؤقتات
         progress.setValue(1)
-        QApplication.processEvents()
-        if hasattr(self, 'auto_save_timer'):
-            self.auto_save_timer.stop()
-        if hasattr(self, 'ai_timer'):
-            self.ai_timer.stop()
-        if hasattr(self, 'uptime_timer'):
-            self.uptime_timer.stop()
+        for timer_name in ('auto_save_timer', 'ai_timer', 'uptime_timer',
+                           'auto_opt_stats_timer'):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                timer.stop()
         
-        # إيقاف المراقبة بسرعة
+        # 2) إيقاف التحسين التلقائي والتذكيرات
         progress.setValue(2)
+        progress.setLabelText("إيقاف الخدمات الخلفية...")
+        QApplication.processEvents()
+        try:
+            self.auto_optimizer.auto_optimize_enabled = False
+            self.auto_optimizer.stop()
+        except Exception as e:
+            logger.debug(f"إيقاف المحسن التلقائي: {e}")
+        try:
+            self.notification_manager.stop_all_reminders()
+        except Exception as e:
+            logger.debug(f"إيقاف التذكيرات: {e}")
+        
+        # 3) إيقاف خيط المراقبة بشكل تعاوني (بدون terminate غير الآمن)
+        progress.setValue(3)
         progress.setLabelText("إيقاف المراقبة...")
         QApplication.processEvents()
-        if hasattr(self, 'monitor_thread'):
-            self.monitor_thread.running = False
-            # عدم الانتظار طويلاً
-            self.monitor_thread.wait(1000)  # انتظار ثانية واحدة فقط
-            if self.monitor_thread.isRunning():
-                self.monitor_thread.terminate()
+        if hasattr(self, 'monitor_thread') and self.monitor_thread is not None:
+            self.monitor_thread.stop(timeout_ms=4000)
         
-        # حفظ سريع للبيانات
-        progress.setValue(3)
+        # 4) حفظ البيانات
+        progress.setValue(4)
         progress.setLabelText("حفظ البيانات...")
         QApplication.processEvents()
         try:
             self.ai.save_learning_data()
-            self._auto_save_data()
-        except:
-            pass
+        except Exception as e:
+            logger.debug(f"حفظ نهائي: {e}")
         
-        # إخفاء الصينية
-        progress.setValue(4)
+        # 5) إخفاء الصينية والخروج
+        progress.setValue(5)
         if hasattr(self, 'tray'):
             self.tray.hide()
         

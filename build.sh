@@ -44,10 +44,15 @@ echo ""
 echo "📥 تثبيت PyInstaller..."
 pip install pyinstaller
 
+# تنظيف البناء السابق
+echo ""
+echo "🧹 تنظيف البناء السابق..."
+rm -rf build dist
+
 # بناء البرنامج
 echo ""
 echo "🔨 بناء البرنامج..."
-pyinstaller batteryguard.spec
+pyinstaller --clean batteryguard.spec
 
 # التحقق من النجاح
 if [ -f "dist/BatteryGuardPro" ]; then
@@ -58,14 +63,20 @@ if [ -f "dist/BatteryGuardPro" ]; then
     echo ""
     echo "📁 الملف القابل للتنفيذ: dist/BatteryGuardPro"
     echo ""
-    echo "🚀 للتشغيل:"
-    echo "   ./dist/BatteryGuardPro"
-    echo ""
     
     # منح صلاحيات التنفيذ
     chmod +x dist/BatteryGuardPro
     
+    # اختبار التشغيل
+    echo "🧪 اختبار التشغيل..."
+    if ./dist/BatteryGuardPro --help 2>/dev/null; then
+        echo "✅ الاختبار نجح"
+    else
+        echo "⚠️ تحذير: قد تكون هناك مشكلة في التشغيل"
+    fi
+    
     # إنشاء ملف .desktop
+    echo ""
     echo "📝 إنشاء ملف .desktop..."
     cat > dist/batteryguard-pro.desktop << EOF
 [Desktop Entry]
@@ -76,18 +87,27 @@ Icon=$(pwd)/assets/logo.png
 Terminal=false
 Type=Application
 Categories=System;Utility;
+StartupNotify=true
 EOF
     
     echo "✅ تم إنشاء ملف .desktop"
     echo ""
     echo "📋 لإضافة اختصار للقائمة:"
     echo "   cp dist/batteryguard-pro.desktop ~/.local/share/applications/"
+    echo ""
+    echo "🚀 للتشغيل:"
+    echo "   ./dist/BatteryGuardPro"
+    echo ""
+    echo "🔄 للتشغيل في الخلفية:"
+    echo "   ./dist/BatteryGuardPro --background"
     
 else
     echo ""
     echo "======================================"
     echo "❌ فشل البناء!"
     echo "======================================"
+    echo ""
+    echo "📝 تحقق من ملف السجل للمزيد من التفاصيل"
     exit 1
 fi
 
@@ -102,5 +122,5 @@ fi
 
 echo ""
 echo "======================================"
-echo "🎉 اكتمل!"
+echo "🎉 اكتمل البناء بنجاح!"
 echo "======================================"

@@ -1,113 +1,127 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""خيط المراقبة الخلفي"""
+"""
+خيط المراقبة الخلفي
 
-import time
+- فاصل مراقبة قابل للتخصيص مع وضع تكيفي (سريع أثناء التفريغ/قرب الحدود،
+  بطيء أثناء الشحن المستقر) لتقليل الاستهلاك.
+- إيقاف تعاوني عبر threading.Event بدلاً من QThread.terminate() غير الآمن.
+- لا يكرر منطق تنبيهات العتبات: مدير الإشعارات هو المصدر الوحيد لقرار
+  الإشعارات، وهذا الخيط يبث البيانات الخام فقط.
+"""
+
 import logging
+import time
 from typing import Dict
+
 from PyQt6.QtCore import QThread, pyqtSignal
 
 logger = logging.getLogger('BatteryGuard')
 
+# فواصل المراقبة بالثواني
+INTERVAL_ACTIVE = 2      # أثناء التفريغ أو قرب حدود التنبيه
+INTERVAL_IDLE = 10       # شحن مستقر بعيداً عن الحدود
+IDLE_MARGIN = 15         # هامش النسبة حول حدود التنبيه ليبقى الوضع نشطاً
+
 
 class MonitorThread(QThread):
-    """خيط المراقبة الخلفي"""
-    
+    """خيط مراقبة حالة البطارية"""
+
     battery_updated = pyqtSignal(dict)
     notification_requested = pyqtSignal(str, str, str)
-    
+
     def __init__(self, monitor, ai, settings: Dict):
         super().__init__()
         self.monitor = monitor
         self.ai = ai
-        self.settings = settings
-        self.running = True
-        self.last_notification_time = {}
-        
+        self.settings = dict(settings)
+        self._stop_event = __import__('threading').Event()
+        self.interval_override: int = None  # فرض فاصل ثابت عند الحاجة
+
+    # ── التحكم بالدورة الحياتية ─────────────────────────────────
+
+    def stop(self, timeout_ms: int = 5000) -> bool:
+        """إيقاف تعاوني نظيف وانتظار انتهاء الخيط"""
+        self._stop_event.set()
+        if self.isRunning():
+            return self.wait(timeout_ms)
+        return True
+
+    @property
+    def running(self) -> bool:
+        """توافق مع الكود القديم الذي كان يضبط running=False"""
+        return not self._stop_event.is_set()
+
+    @running.setter
+    def running(self, value: bool):
+        if not value:
+            self._stop_event.set()
+
+    def update_settings(self, settings: Dict):
+        """تحديث الإعدادات مباشرة من خيط الواجهة"""
+        self.settings = dict(settings)
+
+    # ── حلقة المراقبة ────────────────────────────────────────────
+
     def run(self):
-        """تشغيل المراقبة المستمرة"""
-        while self.running:
+        logger.info("بدأ خيط المراقبة")
+        error_streak = 0
+        while not self._stop_event.is_set():
             try:
                 battery_status = self.monitor.get_battery_status()
-                
+
                 if battery_status['available']:
+                    # تغذية محرك الذكاء الاصطناعي وصحة العتاد
                     self.ai.analyze_usage_pattern(battery_status)
-                    self.check_and_notify(battery_status)
-                    
-                    # التحقق من حدود الشحن
+                    health_info = self.monitor.get_battery_health()
+                    if health_info.get('health_percentage'):
+                        self.ai.update_hardware_health(health_info['health_percentage'])
+
+                    # التحقق من حدود الشحن (تحكم فعلي وليس إشعار عتبات)
                     charge_action = self.monitor.check_charge_limits(
                         battery_status['percent'],
                         battery_status['is_charging']
                     )
-                    
                     if charge_action['action'] != 'none' and charge_action.get('should_notify'):
                         self.notification_requested.emit(
                             "⚡ التحكم في الشحن",
                             charge_action['message'],
                             'normal'
                         )
-                    
+
                     self.battery_updated.emit(battery_status)
-                
-                time.sleep(2)
-                
+                    error_streak = 0
+                    sleep_s = self._compute_interval(battery_status)
+                else:
+                    sleep_s = INTERVAL_IDLE
+
+                self._sleep(sleep_s)
+
             except Exception as e:
-                logger.error(f"خطأ في خيط المراقبة: {e}")
-                time.sleep(30)
-    
-    def check_and_notify(self, battery_status: Dict):
-        """التحقق وإرسال الإشعارات المطلوبة"""
-        percent = battery_status['percent']
-        is_charging = battery_status['is_charging']
-        current_time = time.time()
-        
-        if self.settings.get('notify_low_battery', True):
-            low_threshold = self.settings.get('low_battery_threshold', 20)
-            if percent <= low_threshold and not is_charging:
-                if self._should_notify('low_battery', current_time, 300):
-                    self.notification_requested.emit(
-                        "⚠️ تحذير البطارية",
-                        f"البطارية منخفضة ({percent}%)! يرجى توصيل الشاحن.",
-                        'critical'
-                    )
-        
-        if self.settings.get('notify_charge_suggested', True):
-            charge_threshold = self.settings.get('charge_threshold', 40)
-            if percent <= charge_threshold and not is_charging:
-                if self._should_notify('charge_suggested', current_time, 600):
-                    self.notification_requested.emit(
-                        "🔋 توصية الشحن",
-                        f"البطارية عند {percent}%. يُنصح بتوصيل الشاحن للحفاظ على صحة البطارية.",
-                        'normal'
-                    )
-        
-        if self.settings.get('notify_unplug_suggested', True):
-            unplug_threshold = self.settings.get('unplug_threshold', 80)
-            if percent >= unplug_threshold and is_charging:
-                if self._should_notify('unplug_suggested', current_time, 600):
-                    self.notification_requested.emit(
-                        "✓ اكتمل الشحن الأمثل",
-                        f"البطارية عند {percent}%. يمكن فصل الشاحن للحفاظ على عمر البطارية.",
-                        'normal'
-                    )
-        
-        if self.settings.get('notify_full_charge', True):
-            if percent >= 95 and is_charging:
-                if self._should_notify('full_charge', current_time, 1800):
-                    self.notification_requested.emit(
-                        "✓ البطارية ممتلئة",
-                        f"البطارية مشحونة بالكامل ({percent}%). افصل الشاحن لتجنب الشحن الزائد.",
-                        'low'
-                    )
-    
-    def _should_notify(self, notification_type: str, current_time: float, cooldown: int) -> bool:
-        """التحقق من إمكانية إرسال الإشعار (منع التكرار)"""
-        last_time = self.last_notification_time.get(notification_type, 0)
-        if current_time - last_time >= cooldown:
-            self.last_notification_time[notification_type] = current_time
-            return True
-        return False
-    
-    def stop(self):
-        """إيقاف خيط المراقبة"""
-        self.running = False
+                error_streak += 1
+                backoff = min(60, INTERVAL_IDLE * error_streak)
+                logger.error(f"خطأ في خيط المراقبة ({error_streak} متتالية): {e}")
+                self._sleep(backoff)
+        logger.info("انتهى خيط المراقبة")
+
+    def _compute_interval(self, status: Dict) -> float:
+        """اختيار الفاصل: ثابت إن فُرض، وإلا تكيفي حسب الحالة"""
+        if self.interval_override:
+            return max(1, int(self.interval_override))
+        percent = status['percent']
+        charging = status['is_charging']
+
+        thresholds = [
+            self.settings.get('low_battery_threshold', 20),
+            getattr(self.settings.get('battery_thresholds', None) or {}, 'critical_low', 10),
+            getattr(self.settings.get('battery_thresholds', None) or {}, 'optimal_max', 80),
+        ]
+        near_boundary = any(abs(percent - t) <= IDLE_MARGIN for t in thresholds)
+
+        if not charging or near_boundary or percent <= 20:
+            return INTERVAL_ACTIVE
+        return INTERVAL_IDLE
+
+    def _sleep(self, seconds: float):
+        """انتظار قابل للمقاطعة الفورية عند طلب الإيقاف"""
+        self._stop_event.wait(timeout=max(0.1, seconds))

@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# PyInstaller
+*.spec.bak
+build_env/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+batteryguard.log
+battery_events.log
+*.log.*
+
+# Settings (user data)
+battery_settings.json
+battery_ai_data.json
+auto_optimizer_settings.json
+
+# Test artifacts
+.pytest_cache/
+.qt-test-config/
+htmlcov/
+.coverage
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.old
+
+# Build artifacts
+dist/
+build/
+*.exe
+*.app
+*.dmg
+
+# Test outputs
+test_output/
+.pytest_cache/
+.coverage
+
+# VBS files (generated)
+run_background.vbs

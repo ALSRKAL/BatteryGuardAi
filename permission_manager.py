@@ -114,9 +114,17 @@ class PermissionManager:
     
     def _request_linux_sudo(self, parent_widget) -> bool:
         """طلب كلمة مرور sudo في Linux"""
-        dialog = SudoPasswordDialog(parent_widget)
+        logger.info("📋 عرض نافذة طلب صلاحيات sudo...")
         
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        dialog = SudoPasswordDialog(parent_widget)
+        dialog.show()  # إظهار النافذة أولاً
+        dialog.raise_()  # رفعها للأمام
+        dialog.activateWindow()  # تفعيلها
+        
+        result = dialog.exec()
+        logger.info(f"📋 نتيجة نافذة sudo: {result}")
+        
+        if result == QDialog.DialogCode.Accepted:
             password = dialog.get_password()
             
             if not password:
@@ -148,17 +156,27 @@ class PermissionManager:
         """اختبار كلمة مرور sudo"""
         try:
             # اختبار بسيط: تشغيل أمر sudo echo
+            # استخدام -S لقراءة كلمة المرور من stdin
+            # استخدام -p '' لإخفاء prompt
             process = subprocess.Popen(
-                ['sudo', '-S', 'echo', 'test'],
+                ['sudo', '-S', '-p', '', 'echo', 'test'],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                env={**os.environ, 'SUDO_ASKPASS': '/bin/false'}  # منع أي GUI prompts
             )
             
+            # إرسال كلمة المرور مع newline
             stdout, stderr = process.communicate(input=f"{password}\n", timeout=5)
             
-            return process.returncode == 0
+            # التحقق من النجاح
+            success = process.returncode == 0
+            
+            if not success:
+                logger.debug(f"فشل اختبار sudo: stderr={stderr}")
+            
+            return success
         
         except Exception as e:
             logger.error(f"خطأ في اختبار sudo: {e}")
@@ -176,9 +194,20 @@ class SudoPasswordDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("صلاحيات المسؤول")
         self.setModal(True)
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(450)
+        self.setMinimumHeight(350)
+        
+        # جعل النافذة دائماً في المقدمة
+        self.setWindowFlags(
+            Qt.WindowType.Dialog | 
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.WindowCloseButtonHint
+        )
         
         self.setup_ui()
+        
+        # وضع النافذة في وسط الشاشة
+        self.center_on_screen()
     
     def setup_ui(self):
         """إعداد الواجهة"""
@@ -278,6 +307,14 @@ class SudoPasswordDialog(QDialog):
                     stop:0 #1e293b, stop:1 #0f172a);
             }
         """)
+    
+    def center_on_screen(self):
+        """وضع النافذة في وسط الشاشة"""
+        from PyQt6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen().geometry()
+        x = (screen.width() - self.width()) // 2
+        y = (screen.height() - self.height()) // 2
+        self.move(x, y)
     
     def get_password(self) -> str:
         """الحصول على كلمة المرور المدخلة"""

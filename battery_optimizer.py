@@ -8,6 +8,8 @@ import logging
 import subprocess
 import psutil
 import gc
+import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 from datetime import datetime
@@ -47,6 +49,7 @@ class BatteryOptimizer:
     def __init__(self, ai_engine=None):
         self.optimization_history = []
         self.is_optimizing = False
+        self._optimizing_lock = threading.Lock()
         self.sudo_password = None
         self.ai_engine = ai_engine
         self.smart_optimization_enabled = True
@@ -70,10 +73,12 @@ class BatteryOptimizer:
     
     def optimize_battery(self, use_cached_password: bool = True, optimization_mode: str = 'intelligent') -> Dict:
         """تحسين شامل ذكي للبطارية مع الذكاء الاصطناعي"""
-        if self.is_optimizing:
-            return {'success': False, 'message': 'التحسين قيد التنفيذ بالفعل'}
+        # حماية ذرية ضد سباق النقر اليدوي مع المحسن التلقائي
+        with self._optimizing_lock:
+            if self.is_optimizing:
+                return {'success': False, 'message': 'التحسين قيد التنفيذ بالفعل'}
+            self.is_optimizing = True
         
-        self.is_optimizing = True
         self.total_optimizations += 1
         
         results = {
@@ -434,12 +439,14 @@ class BatteryOptimizer:
                                 if item.is_file():
                                     size = item.stat().st_size
                                     # حذف الملفات القديمة فقط (أكثر من يوم)
-                                    if (Path.ctime - item.stat().st_ctime) > 86400:
+                                    # ملاحظة: كان هنا Path.ctime - خطأ TypeError
+                                    # كان يجعل التنظيف يفشل بصمت لكل ملف
+                                    if (time.time() - item.stat().st_mtime) > 86400:
                                         item.unlink()
                                         cleaned_size += size
-                            except:
+                            except OSError:
                                 continue
-                    except:
+                    except OSError:
                         continue
             
             cleaned_mb = cleaned_size / (1024 * 1024)

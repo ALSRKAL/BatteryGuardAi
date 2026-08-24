@@ -22,13 +22,14 @@ def run_with_sudo(command: List[str], password: str = None) -> Tuple[bool, str]:
     """تشغيل أمر مع صلاحيات sudo"""
     try:
         if IS_LINUX and password:
-            sudo_cmd = ['sudo', '-S'] + command
+            sudo_cmd = ['sudo', '-S', '-p', ''] + command  # -p '' لإخفاء prompt
             process = subprocess.Popen(
                 sudo_cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                env={**os.environ, 'SUDO_ASKPASS': '/bin/false'}  # منع GUI prompts
             )
             stdout, stderr = process.communicate(input=f"{password}\n", timeout=10)
             return process.returncode == 0, stdout + stderr

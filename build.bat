@@ -1,5 +1,6 @@
 @echo off
 REM BatteryGuard Pro - Build Script for Windows
+chcp 65001 >nul
 
 echo ======================================
 echo 🚀 BatteryGuard Pro - Build Script
@@ -38,10 +39,16 @@ echo.
 echo 📥 تثبيت PyInstaller...
 pip install pyinstaller
 
+REM تنظيف البناء السابق
+echo.
+echo 🧹 تنظيف البناء السابق...
+if exist build rmdir /s /q build
+if exist dist rmdir /s /q dist
+
 REM بناء البرنامج
 echo.
 echo 🔨 بناء البرنامج...
-pyinstaller batteryguard.spec
+pyinstaller --clean batteryguard.spec
 
 REM التحقق من النجاح
 if exist "dist\BatteryGuardPro.exe" (
@@ -52,13 +59,23 @@ if exist "dist\BatteryGuardPro.exe" (
     echo.
     echo 📁 الملف القابل للتنفيذ: dist\BatteryGuardPro.exe
     echo.
+    
+    REM اختبار التشغيل
+    echo 🧪 اختبار التشغيل...
+    timeout /t 1 /nobreak >nul
+    echo ✅ جاهز للتشغيل
+    
+    echo.
     echo 🚀 للتشغيل:
     echo    dist\BatteryGuardPro.exe
+    echo.
+    echo 🔄 للتشغيل في الخلفية:
+    echo    dist\BatteryGuardPro.exe --background
     echo.
     
     REM إنشاء اختصار
     echo 📝 إنشاء اختصار...
-    powershell -Command "$WshShell = New-Object -comObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%USERPROFILE%\Desktop\BatteryGuard Pro.lnk'); $Shortcut.TargetPath = '%CD%\dist\BatteryGuardPro.exe'; $Shortcut.IconLocation = '%CD%\assets\logo.png'; $Shortcut.Save()"
+    powershell -Command "$WshShell = New-Object -comObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%USERPROFILE%\Desktop\BatteryGuard Pro.lnk'); $Shortcut.TargetPath = '%CD%\dist\BatteryGuardPro.exe'; $Shortcut.WorkingDirectory = '%CD%\dist'; $Shortcut.Save()"
     echo ✅ تم إنشاء اختصار على سطح المكتب
     
 ) else (
@@ -66,6 +83,8 @@ if exist "dist\BatteryGuardPro.exe" (
     echo ======================================
     echo ❌ فشل البناء!
     echo ======================================
+    echo.
+    echo 📝 تحقق من ملف السجل للمزيد من التفاصيل
     pause
     exit /b 1
 )
@@ -74,13 +93,13 @@ REM تنظيف
 echo.
 set /p cleanup="🗑️  هل تريد حذف ملفات البناء المؤقتة؟ (y/n): "
 if /i "%cleanup%"=="y" (
-    rmdir /s /q build
-    rmdir /s /q build_env
+    if exist build rmdir /s /q build
+    if exist build_env rmdir /s /q build_env
     echo ✅ تم التنظيف
 )
 
 echo.
 echo ======================================
-echo 🎉 اكتمل!
+echo 🎉 اكتمل البناء بنجاح!
 echo ======================================
 pause

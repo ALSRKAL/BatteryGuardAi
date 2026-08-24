@@ -55,6 +55,12 @@ class AutoOptimizer:
         self.needs_optimization = False
         self.optimization_priority = 0  # 0-10
         
+        # تهيئة عداد CPU (القراءة الأولى لـ cpu_percent(interval=None) تعيد 0)
+        try:
+            psutil.cpu_percent(interval=None)
+        except Exception:
+            pass
+        
         # تحميل الإعدادات
         self._load_settings()
     
@@ -115,7 +121,8 @@ class AutoOptimizer:
         """قياس حالة النظام الحالية"""
         try:
             self.system_status = {
-                'cpu_percent': psutil.cpu_percent(interval=1),
+                # قراءة غير مانعة (interval=1 كانت تحجب الخيط ثانية كاملة)
+                'cpu_percent': psutil.cpu_percent(interval=None),
                 'memory_percent': psutil.virtual_memory().percent,
                 'disk_percent': psutil.disk_usage('/').percent,
                 'process_count': len(psutil.pids()),
@@ -411,40 +418,33 @@ class AutoOptimizer:
         return self.system_status.copy()
     
     def _load_settings(self):
-        """تحميل الإعدادات"""
+        """تحميل الإعدادات من مجلد بيانات المستخدم (قراءة ذرية)"""
         try:
-            settings_file = Path('auto_optimizer_settings.json')
-            if settings_file.exists():
-                with open(settings_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    
-                    self.auto_optimize_enabled = data.get('enabled', False)
-                    self.optimization_mode = data.get('mode', 'on_demand')
-                    self.optimization_interval = data.get('interval', 300)
-                    self.thresholds = data.get('thresholds', self.thresholds)
-                    self.optimization_count = data.get('optimization_count', 0)
-                    self.total_power_saved = data.get('total_power_saved', 0)
-                    
-                    logger.info("تم تحميل إعدادات التحسين التلقائي")
+            from storage import load_json_data
+            data = load_json_data('auto_optimizer_settings.json', None)
+            if isinstance(data, dict):
+                self.auto_optimize_enabled = data.get('enabled', False)
+                self.optimization_mode = data.get('mode', 'on_demand')
+                self.optimization_interval = data.get('interval', 300)
+                self.thresholds = {**self.thresholds, **data.get('thresholds', {})}
+                self.optimization_count = data.get('optimization_count', 0)
+                self.total_power_saved = data.get('total_power_saved', 0)
+                logger.info("تم تحميل إعدادات التحسين التلقائي")
         except Exception as e:
             logger.error(f"خطأ في تحميل إعدادات التحسين: {e}")
     
     def _save_settings(self):
-        """حفظ الإعدادات"""
+        """حفظ الإعدادات في مجلد بيانات المستخدم (كتابة ذرية)"""
         try:
-            settings_file = Path('auto_optimizer_settings.json')
-            data = {
+            from storage import save_json_data
+            save_json_data('auto_optimizer_settings.json', {
                 'enabled': self.auto_optimize_enabled,
                 'mode': self.optimization_mode,
                 'interval': self.optimization_interval,
                 'thresholds': self.thresholds,
                 'optimization_count': self.optimization_count,
                 'total_power_saved': self.total_power_saved,
-                'last_updated': datetime.now().isoformat()
-            }
-            
-            with open(settings_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            
+                'last_updated': datetime.now().isoformat(),
+            })
         except Exception as e:
             logger.error(f"خطأ في حفظ إعدادات التحسين: {e}")
