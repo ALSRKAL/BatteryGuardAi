@@ -74,12 +74,20 @@ class TestAppSmoke:
     """اختبار دخان: إنشاء النافذة الرئيسية كاملة وتنظيفها"""
 
     def test_modern_ui_lifecycle(self, qapp, isolated_data_dir, clean_qsettings):
+        from i18n import t
         from main_window import ModernUI
         window = ModernUI()
         try:
-            assert window.tabs.count() == 4  # الحالة/الإعدادات/AI/الإحصائيات
+            # خمسة مجالات مستقلة: الحالة، التحكم، التحليل، السجل، الإعدادات
+            expected = [t('tab.status'), t('tab.control'), t('tab.intelligence'),
+                        t('tab.record'), t('tab.settings')]
+            assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == expected
             assert window.monitor_thread is not None
             assert window.ai is not None
+            # كل مجال يجب أن يكون قد أنشأ عناصره الأساسية
+            assert window.state_plate is not None
+            assert window.charge_window_jaw is not None
+            assert window.capability_strip is not None
         finally:
             window.ai_timer.stop()
             window.auto_save_timer.stop()
