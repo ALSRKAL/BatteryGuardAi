@@ -208,7 +208,7 @@ class SmartNotificationManager:
     def _initialize_notifications(self):
         if IS_LINUX and NOTIFY_AVAILABLE:
             try:
-                Notify.init("BatteryGuard Pro")
+                Notify.init("BatteryGuardAI")
                 self.notification_method = 'notify'
                 logger.info("نظام الإشعارات: Notify (Linux)")
                 return
@@ -513,7 +513,7 @@ class SmartNotificationManager:
                     timeout = 15 if urgency == 'critical' else 7
                     plyer_notification.notify(
                         title=title, message=message,
-                        app_name='BatteryGuard Pro',
+                        app_name='BatteryGuardAI',
                         timeout=timeout,
                         app_icon=icon if Path(icon).exists() else None,
                     )
@@ -559,7 +559,7 @@ class SmartNotificationManager:
             subprocess.Popen(
                 [
                     'notify-send',
-                    '--app-name=BatteryGuard Pro',
+                    '--app-name=BatteryGuardAI',
                     f'--urgency={urgency_level}',
                     f'--expire-time={expire}',
                     f'--icon={icon}',
@@ -614,7 +614,7 @@ class SmartNotificationManager:
 
         if current_percent <= t['critical_low'] and not is_charging:
             self.send_notification(
-                title="🚨 تحذير حرج - البطارية منخفضة جداً!",
+                title="تحذير حرج - البطارية منخفضة جداً!",
                 message=f"البطارية {current_percent}%! وصّل الشاحن فوراً لتجنب إيقاف الجهاز",
                 urgency='critical', notification_type='battery_critical',
                 play_sound=True, persistent=True)
@@ -622,7 +622,7 @@ class SmartNotificationManager:
                 'battery_critical',
                 lambda: self._get_current_battery() <= t['critical_low'] and not self._is_charging(),
                 {
-                    'title': '🚨 تحذير متكرر - البطارية حرجة!',
+                    'title': 'تحذير متكرر - البطارية حرجة!',
                     'message': f'البطارية لا تزال {current_percent}%! وصّل الشاحن الآن!',
                     'urgency': 'critical',
                     'play_sound': True,
@@ -632,14 +632,14 @@ class SmartNotificationManager:
 
         if current_percent <= t['low'] and not is_charging:
             self.send_notification(
-                title="⚠️ بطارية منخفضة",
+                title="بطارية منخفضة",
                 message=f"البطارية {current_percent}% - يُنصح بالشحن قريباً",
                 urgency='normal', notification_type='battery_low', play_sound=True)
             self.start_reminder(
                 'battery_low',
                 lambda: self._get_current_battery() <= t['low'] and not self._is_charging(),
                 {
-                    'title': '🔋 تذكير - البطارية منخفضة',
+                    'title': 'تذكير - البطارية منخفضة',
                     'message': f'البطارية {current_percent}% - فكر في الشحن',
                     'urgency': 'normal',
                     'play_sound': False,
@@ -648,7 +648,7 @@ class SmartNotificationManager:
 
         if current_percent >= t['full'] and is_charging:
             self.send_notification(
-                title="✅ اكتمل الشحن",
+                title="اكتمل الشحن",
                 message=f"البطارية {current_percent}% - يمكن فصل الشاحن لحماية البطارية",
                 urgency='low', notification_type='charge_complete', play_sound=True)
             if self.smart_alerts['charger_disconnect_reminder']:
@@ -656,7 +656,7 @@ class SmartNotificationManager:
                     'unplug_charger',
                     lambda: self._get_current_battery() >= t['full'] and self._is_charging(),
                     {
-                        'title': '🔌 تذكير - فصل الشاحن',
+                        'title': 'تذكير - فصل الشاحن',
                         'message': f'البطارية ممتلئة {current_percent}% - افصل الشاحن لحماية البطارية',
                         'urgency': 'normal',
                         'play_sound': True,
@@ -666,14 +666,14 @@ class SmartNotificationManager:
         if (t['optimal_min'] <= current_percent <= t['optimal_max']
                 and is_charging and self.smart_alerts['optimal_charge_reminder']):
             self.send_notification(
-                title="⚡ الشحن الأمثل",
+                title="الشحن الأمثل",
                 message=f"البطارية {current_percent}% - في النطاق الأمثل للصحة",
                 urgency='low', notification_type='optimal_charge', play_sound=False)
             return True
 
         if battery_health < 80 and self.smart_alerts['health_warnings']:
             self.send_notification(
-                title="💊 تحذير صحة البطارية",
+                title="تحذير صحة البطارية",
                 message=f"صحة البطارية {battery_health}% - تجنب الشحن الكامل والتفريغ العميق",
                 urgency='normal', notification_type='health_warning', play_sound=True)
             return True
@@ -688,13 +688,13 @@ class SmartNotificationManager:
         if was_charging and not is_charging:
             if battery_percent < t['optimal_min']:
                 self.send_notification(
-                    title="🔌 تم فصل الشاحن",
+                    title="تم فصل الشاحن",
                     message=f"البطارية {battery_percent}% - أقل من المستوى الأمثل",
                     urgency='normal', notification_type='charger_disconnected',
                     play_sound=True)
             else:
                 self.send_notification(
-                    title="✅ تم فصل الشاحن",
+                    title="تم فصل الشاحن",
                     message=f"البطارية {battery_percent}% - مستوى جيد",
                     urgency='low', notification_type='charger_disconnected',
                     play_sound=False)
@@ -702,7 +702,7 @@ class SmartNotificationManager:
         elif not was_charging and is_charging:
             if battery_percent <= t['critical_low']:
                 self.send_notification(
-                    title="⚡ تم توصيل الشاحن",
+                    title="تم توصيل الشاحن",
                     message=f"البطارية {battery_percent}% - شحن سريع مطلوب",
                     urgency='normal', notification_type='charger_connected',
                     play_sound=True)
@@ -711,7 +711,7 @@ class SmartNotificationManager:
                 self.stop_reminder('battery_low')
             else:
                 self.send_notification(
-                    title="🔋 بدء الشحن",
+                    title="بدء الشحن",
                     message=f"البطارية {battery_percent}% - جارٍ الشحن",
                     urgency='low', notification_type='charger_connected',
                     play_sound=False)
@@ -723,21 +723,21 @@ class SmartNotificationManager:
 
         if usage_data.get('high_drain_detected', False):
             self.send_notification(
-                title="📈 استهلاك مرتفع مكتشف",
+                title="استهلاك مرتفع مكتشف",
                 message="استهلاك البطارية أعلى من المعتاد - تحقق من التطبيقات",
                 urgency='normal', notification_type='high_usage_alert',
                 play_sound=True)
 
         if usage_data.get('temperature', 0) > 45 and self.smart_alerts['temperature_warnings']:
             self.send_notification(
-                title="🌡️ تحذير درجة الحرارة",
+                title="تحذير درجة الحرارة",
                 message=f"درجة حرارة البطارية {usage_data['temperature']}°C - قلل الاستخدام",
                 urgency='high', notification_type='temperature_warning',
                 play_sound=True)
 
         if usage_data.get('unhealthy_charging_pattern', False):
             self.send_notification(
-                title="⚠️ نمط شحن غير صحي",
+                title="نمط شحن غير صحي",
                 message="تم اكتشاف نمط شحن قد يضر بالبطارية - راجع عاداتك",
                 urgency='normal', notification_type='charging_pattern_warning',
                 play_sound=True)
@@ -751,7 +751,7 @@ class SmartNotificationManager:
 
         alerts = {
             'battery_degradation': {
-                'title': '🔋 تدهور البطارية مكتشف',
+                'title': 'تدهور البطارية مكتشف',
                 'message': f'الذكاء الاصطناعي يشير لتدهور في الأداء (ثقة: {confidence}%)',
                 'urgency': 'normal'},
             'optimal_charge_time': {
@@ -759,11 +759,11 @@ class SmartNotificationManager:
                 'message': f'الآن وقت مثالي للشحن بناءً على أنماطك (ثقة: {confidence}%)',
                 'urgency': 'low'},
             'usage_prediction': {
-                'title': '🔮 توقع الاستخدام',
+                'title': 'توقع الاستخدام',
                 'message': ai_data.get('message', 'توقع ذكي للاستخدام'),
                 'urgency': 'low'},
             'maintenance_reminder': {
-                'title': '🔧 تذكير صيانة ذكي',
+                'title': 'تذكير صيانة ذكي',
                 'message': ai_data.get('message', 'حان وقت صيانة البطارية'),
                 'urgency': 'normal'},
         }
@@ -779,7 +779,7 @@ class SmartNotificationManager:
         if not self.ai_recommendations_enabled:
             return False
         return self.send_notification(
-            title="🤖 توصية ذكية", message=recommendation,
+            title="توصية ذكية", message=recommendation,
             urgency='normal', notification_type='ai_recommendation',
             ai_priority=priority)
 
@@ -787,16 +787,16 @@ class SmartNotificationManager:
                                        power_saved: float = 0) -> bool:
         """إشعار التحسين مع الصوت المناسب"""
         messages = {
-            'started': {'title': '🚀 بدء التحسين',
+            'started': {'title': 'بدء التحسين',
                         'message': 'جارٍ تحسين النظام لتوفير الطاقة...',
                         'urgency': 'low'},
-            'completed': {'title': '✅ اكتمل التحسين',
+            'completed': {'title': 'اكتمل التحسين',
                           'message': f'تم التحسين بنجاح! توفير: {power_saved:.1f}% طاقة',
                           'urgency': 'normal'},
-            'auto_started': {'title': '🤖 تحسين تلقائي',
+            'auto_started': {'title': 'تحسين تلقائي',
                              'message': 'تم اكتشاف حاجة للتحسين - جارٍ التحسين...',
                              'urgency': 'low'},
-            'auto_completed': {'title': '✅ تحسين تلقائي ناجح',
+            'auto_completed': {'title': 'تحسين تلقائي ناجح',
                                'message': f'تم التحسين التلقائي! توفير: {power_saved:.1f}% طاقة',
                                'urgency': 'normal'},
         }
@@ -808,7 +808,7 @@ class SmartNotificationManager:
     def send_optimization_complete_alert(self, power_saved: float) -> bool:
         """إشعار اكتمال التحسين"""
         return self.send_notification(
-            title="✅ اكتمل التحسين",
+            title="اكتمل التحسين",
             message=f"تم تحسين النظام بنجاح!\nتوفير متوقع: {power_saved:.0f}% من الطاقة",
             urgency='normal', notification_type='optimization_complete',
             play_sound=True)

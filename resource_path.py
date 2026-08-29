@@ -104,14 +104,14 @@ def is_frozen() -> bool:
 
 # اختبار سريع
 if __name__ == '__main__':
-    print("🔍 اختبار مدير المسارات")
+    print("اختبار مدير المسارات")
     print(f"وضع التشغيل: {'مبني (Frozen)' if is_frozen() else 'تطوير (Development)'}")
     print(f"\nمسار الموارد: {get_resource_path('.')}")
     print(f"مسار البيانات: {get_data_path('test.json')}")
     print(f"مسار السجل: {get_log_path()}")
     
     # اختبار الأصوات
-    print("\n🔊 اختبار ملفات الأصوات:")
+    print("\n اختبار ملفات الأصوات:")
     sounds = [
         'sounds/new-notification-010-352755.mp3',
         'sounds/new-notification-05-352453.mp3',
@@ -122,5 +122,5 @@ if __name__ == '__main__':
     
     for sound in sounds:
         path = get_resource_path(sound)
-        status = "✅" if path.exists() else "❌"
+        status = "" if path.exists() else ""
         print(f"{status} {sound}: {path}")

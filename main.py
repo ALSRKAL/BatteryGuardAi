@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BatteryGuard Pro - نظام إدارة بطارية احترافي مع ذكاء اصطناعي
+BatteryGuardAI - نظام إدارة بطارية احترافي مع ذكاء اصطناعي
 نظام متقدم لتحسين عمر البطارية وإدارتها بذكاء عبر المنصات
 """
 
@@ -37,11 +37,32 @@ logging.basicConfig(
 logger = logging.getLogger('BatteryGuard')
 
 # تسجيل معلومات التشغيل
-logger.info(f"🚀 بدء BatteryGuard Pro - وضع: {'مبني' if is_frozen() else 'تطوير'}")
-logger.info(f"📝 ملف السجل: {log_file}")
+logger.info(f"بدء BatteryGuardAI - وضع: {'مبني' if is_frozen() else 'تطوير'}")
+logger.info(f"ملف السجل: {log_file}")
 
+from PyQt6.QtCore import Qt
+
+from default_settings import (APP_NAME, APP_ORG, APP_VERSION,
+                              get_default_settings)
+from i18n import is_rtl, set_language
 from main_window import ModernUI
 from single_instance import SingleInstance
+
+
+def _saved_language() -> str:
+    """
+    اللغة المحفوظة في إعدادات المستخدم، وإلا الافتراضية.
+    تُقرأ قبل بناء الواجهة لأن اتجاه التخطيط يُضبط مرة واحدة على التطبيق.
+    """
+    try:
+        from resource_path import get_data_path
+        settings_file = get_data_path('battery_settings.json')
+        if settings_file.exists():
+            with open(settings_file, 'r', encoding='utf-8') as handle:
+                return str(json.load(handle).get('language', 'ar'))
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        logger.debug(f"تعذّرت قراءة اللغة المحفوظة: {e}")
+    return get_default_settings().get('language', 'ar')
 
 
 def main():
@@ -51,34 +72,40 @@ def main():
     instance = SingleInstance('BatteryGuardPro')
     
     if instance.is_already_running():
-        logger.warning("⚠️ BatteryGuard Pro يعمل بالفعل!")
+        logger.warning("BatteryGuardAI يعمل بالفعل!")
         
         # محاولة إظهار النافذة الموجودة
         if instance.show_existing_instance():
-            logger.info("✅ تم إرسال إشارة لإظهار النافذة الموجودة")
+            logger.info("تم إرسال إشارة لإظهار النافذة الموجودة")
             print("\n" + "="*60)
-            print("⚠️  BatteryGuard Pro يعمل بالفعل!")
-            print("✅ تم إظهار النافذة الموجودة")
-            print("💡 تحقق من أيقونة شريط المهام")
+            print("BatteryGuardAI يعمل بالفعل!")
+            print("تم إظهار النافذة الموجودة")
+            print("تحقق من أيقونة شريط المهام")
             print("="*60 + "\n")
         else:
             print("\n" + "="*60)
-            print("⚠️  BatteryGuard Pro يعمل بالفعل!")
-            print("💡 تحقق من أيقونة شريط المهام")
+            print("BatteryGuardAI يعمل بالفعل!")
+            print("تحقق من أيقونة شريط المهام")
             print("="*60 + "\n")
         
         sys.exit(0)
     
-    logger.info("🚀 بدء تشغيل BatteryGuard Pro...")
+    logger.info("بدء تشغيل BatteryGuardAI...")
     
     # التحقق من وضع الخلفية
     background_mode = '--background' in sys.argv or '--minimized' in sys.argv
     
     app = QApplication(sys.argv)
-    app.setApplicationName("BatteryGuard Pro")
-    app.setOrganizationName("BatteryGuard")
-    app.setApplicationVersion("2.0")
-    
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName(APP_ORG)
+    app.setApplicationVersion(APP_VERSION)
+
+    # اللغة واتجاه القراءة قبل بناء أي واجهة
+    language = set_language(_saved_language())
+    if is_rtl(language):
+        app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+    logger.info(f"لغة الواجهة: {language}")
+
     # منع إغلاق التطبيق عند إغلاق آخر نافذة (للعمل في الخلفية)
     app.setQuitOnLastWindowClosed(False)
     
@@ -101,7 +128,7 @@ def main():
         if not settings_file.exists():
             is_first_run = True
             show_welcome = True
-            logger.info("🎉 التشغيل الأول - تطبيق الإعدادات الافتراضية")
+            logger.info("التشغيل الأول - تطبيق الإعدادات الافتراضية")
             
             # إنشاء مجلد البيانات إذا لم يكن موجوداً
             settings_file.parent.mkdir(parents=True, exist_ok=True)
@@ -113,7 +140,7 @@ def main():
             with open(settings_file, 'w', encoding='utf-8') as f:
                 json.dump(default_settings, f, indent=2, ensure_ascii=False)
             
-            logger.info("✅ تم حفظ الإعدادات الافتراضية")
+            logger.info("تم حفظ الإعدادات الافتراضية")
         else:
             # قراءة الإعدادات الموجودة
             try:
@@ -121,12 +148,12 @@ def main():
                     settings = json.load(f)
                     # إذا لم يكن الخيار موجود، اعتبره True (للتوافق مع الإصدارات القديمة)
                     show_welcome = settings.get('show_welcome_dialog', True)
-                    logger.info(f"📖 تم قراءة الإعدادات الموجودة - show_welcome={show_welcome}")
+                    logger.info(f"تم قراءة الإعدادات الموجودة - show_welcome={show_welcome}")
             except Exception as e:
-                logger.warning(f"⚠️ خطأ في قراءة الإعدادات: {e}")
+                logger.warning(f"خطأ في قراءة الإعدادات: {e}")
                 show_welcome = False
     except Exception as e:
-        logger.error(f"❌ خطأ في التحقق من التشغيل الأول: {e}")
+        logger.error(f"خطأ في التحقق من التشغيل الأول: {e}")
         import traceback
         logger.error(traceback.format_exc())
         is_first_run = False
@@ -157,12 +184,12 @@ def main():
             from welcome_dialog import WelcomeDialog
             import json
             
-            logger.info("📋 عرض نافذة الترحيب...")
+            logger.info("عرض نافذة الترحيب...")
             
             welcome = WelcomeDialog(window)
             result = welcome.exec()
             
-            logger.info(f"✅ نافذة الترحيب: نتيجة={result}")
+            logger.info(f"نافذة الترحيب: نتيجة={result}")
             
             # حفظ خيار عدم الإظهار مرة أخرى
             if not welcome.should_show_again():
@@ -173,26 +200,26 @@ def main():
                     settings['show_welcome_dialog'] = False
                     with open(settings_file, 'w', encoding='utf-8') as f:
                         json.dump(settings, f, indent=2, ensure_ascii=False)
-                    logger.info("✅ تم حفظ خيار عدم إظهار الترحيب")
+                    logger.info("تم حفظ خيار عدم إظهار الترحيب")
                 except Exception as e:
-                    logger.warning(f"⚠️ خطأ في حفظ خيار الترحيب: {e}")
+                    logger.warning(f"خطأ في حفظ خيار الترحيب: {e}")
             
             # إذا اختار المستخدم فتح الإعدادات
             if result == 2:
-                logger.info("📋 المستخدم اختار فتح الإعدادات")
+                logger.info("المستخدم اختار فتح الإعدادات")
                 # يمكن إضافة كود لفتح نافذة الإعدادات هنا
         except Exception as e:
-            logger.error(f"❌ خطأ في عرض نافذة الترحيب: {e}")
+            logger.error(f"خطأ في عرض نافذة الترحيب: {e}")
             import traceback
             logger.error(traceback.format_exc())
     
     # إذا كان في وضع الخلفية، لا تظهر النافذة
     if not background_mode:
         window.show()
-        logger.info("✅ تم تشغيل BatteryGuard Pro بنجاح")
+        logger.info("تم تشغيل BatteryGuardAI بنجاح")
     else:
-        logger.info("🔄 BatteryGuard Pro يعمل في وضع الخلفية")
-        logger.info("💡 انقر على أيقونة شريط المهام لإظهار النافذة")
+        logger.info("BatteryGuardAI يعمل في وضع الخلفية")
+        logger.info("انقر على أيقونة شريط المهام لإظهار النافذة")
     
     # تشغيل التطبيق
     exit_code = app.exec()

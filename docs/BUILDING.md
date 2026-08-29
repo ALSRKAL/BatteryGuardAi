@@ -1,4 +1,4 @@
-# 🔨 تعليمات البناء والتشغيل - BatteryGuard Pro
+# 🔨 تعليمات البناء والتشغيل - BatteryGuardAI
 
 ## 📋 المتطلبات الأساسية
 
@@ -127,7 +127,7 @@ mkdir -p ~/.config/autostart
 cat > ~/.config/autostart/batteryguard.desktop << EOF
 [Desktop Entry]
 Type=Application
-Name=BatteryGuard Pro
+Name=BatteryGuardAI
 Exec=/path/to/BatteryGuardPro --background
 Terminal=false
 X-GNOME-Autostart-enabled=true

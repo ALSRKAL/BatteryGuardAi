@@ -56,7 +56,7 @@ class SingleInstance:
                 self.socket.bind(('127.0.0.1', self.port))
                 self.socket.listen(1)
                 self.is_running = False
-                logger.info(f"✅ تم الحصول على القفل - المنفذ: {self.port}")
+                logger.info(f"تم الحصول على القفل - المنفذ: {self.port}")
                 
                 # كتابة معلومات العملية في ملف القفل
                 self._write_lock_file()
@@ -66,7 +66,7 @@ class SingleInstance:
                 self.is_running = True
                 self.socket.close()
                 self.socket = None
-                logger.warning(f"⚠️ البرنامج يعمل بالفعل - المنفذ {self.port} مستخدم")
+                logger.warning(f"البرنامج يعمل بالفعل - المنفذ {self.port} مستخدم")
                 
                 # التحقق من ملف القفل
                 if self.lock_file.exists():
@@ -105,7 +105,7 @@ class SingleInstance:
             client_socket.connect(('127.0.0.1', self.port))
             client_socket.send(b'SHOW')
             client_socket.close()
-            logger.info("✅ تم إرسال إشارة لإظهار النافذة")
+            logger.info("تم إرسال إشارة لإظهار النافذة")
             return True
         except Exception as e:
             logger.warning(f"تعذر إرسال إشارة للنسخة العاملة: {e}")
@@ -132,7 +132,7 @@ class SingleInstance:
                         if data == b'SHOW':
                             # لا تستدعي دوال الواجهة من هنا مباشرة؛
                             # ارفع الطلب ليقرر الخيط الرئيسي (انظر main.py)
-                            logger.info("📢 تم استقبال طلب لإظهار النافذة")
+                            logger.info("تم استقبال طلب لإظهار النافذة")
                             if hasattr(self, 'on_show_request'):
                                 try:
                                     self.on_show_request()
@@ -166,7 +166,7 @@ class SingleInstance:
                 except Exception:
                     pass
             
-            logger.info("✅ تم تحرير القفل")
+            logger.info("تم تحرير القفل")
         except Exception as e:
             logger.error(f"خطأ في تحرير القفل: {e}")
     
@@ -270,47 +270,47 @@ class SingleInstanceChecker:
 def test_single_instance():
     """اختبار نظام Single Instance"""
     print("=" * 60)
-    print("🧪 اختبار نظام Single Instance")
+    print("اختبار نظام Single Instance")
     print("=" * 60)
     
     # الاختبار 1: إنشاء نسخة أولى
-    print("\n1️⃣ إنشاء النسخة الأولى...")
+    print("\n1⃣ إنشاء النسخة الأولى...")
     instance1 = SingleInstance('TestApp')
     
     if instance1.is_already_running():
-        print("❌ خطأ: النسخة الأولى تعتقد أن هناك نسخة أخرى!")
+        print("خطأ: النسخة الأولى تعتقد أن هناك نسخة أخرى!")
     else:
-        print("✅ النسخة الأولى تعمل بنجاح")
+        print("النسخة الأولى تعمل بنجاح")
     
     # الاختبار 2: محاولة إنشاء نسخة ثانية
-    print("\n2️⃣ محاولة إنشاء نسخة ثانية...")
+    print("\n2⃣ محاولة إنشاء نسخة ثانية...")
     instance2 = SingleInstance('TestApp')
     
     if instance2.is_already_running():
-        print("✅ تم اكتشاف النسخة الأولى بنجاح")
+        print("تم اكتشاف النسخة الأولى بنجاح")
         print("   محاولة إظهار النسخة الأولى...")
         instance2.show_existing_instance()
     else:
-        print("❌ خطأ: لم يتم اكتشاف النسخة الأولى!")
+        print("خطأ: لم يتم اكتشاف النسخة الأولى!")
     
     # الاختبار 3: تحرير القفل
-    print("\n3️⃣ تحرير القفل...")
+    print("\n3⃣ تحرير القفل...")
     instance1.release()
-    print("✅ تم تحرير القفل")
+    print("تم تحرير القفل")
     
     # الاختبار 4: محاولة إنشاء نسخة بعد التحرير
-    print("\n4️⃣ محاولة إنشاء نسخة بعد التحرير...")
+    print("\n4⃣ محاولة إنشاء نسخة بعد التحرير...")
     instance3 = SingleInstance('TestApp')
     
     if instance3.is_already_running():
-        print("❌ خطأ: لا يزال يعتقد أن هناك نسخة أخرى!")
+        print("خطأ: لا يزال يعتقد أن هناك نسخة أخرى!")
     else:
-        print("✅ تم إنشاء نسخة جديدة بنجاح")
+        print("تم إنشاء نسخة جديدة بنجاح")
     
     instance3.release()
     
     print("\n" + "=" * 60)
-    print("✅ اكتمل الاختبار")
+    print("اكتمل الاختبار")
     print("=" * 60)
 
 

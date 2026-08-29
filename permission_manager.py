@@ -32,7 +32,7 @@ class PermissionManager:
                 import ctypes
                 self.has_admin_rights = ctypes.windll.shell32.IsUserAnAdmin() != 0
                 if self.has_admin_rights:
-                    logger.info("✅ يعمل بصلاحيات المسؤول (Windows)")
+                    logger.info("يعمل بصلاحيات المسؤول (Windows)")
             except:
                 self.has_admin_rights = False
         
@@ -40,7 +40,7 @@ class PermissionManager:
             # التحقق من متغير البيئة أولاً
             if os.environ.get('BATTERYGUARD_SUDO_VERIFIED') == '1':
                 self.has_admin_rights = True
-                logger.info("✅ صلاحيات sudo محفوظة في الجلسة")
+                logger.info("صلاحيات sudo محفوظة في الجلسة")
                 return
             
             # التحقق من إمكانية الكتابة إلى ملفات النظام
@@ -54,7 +54,7 @@ class PermissionManager:
                     with open(threshold_path, 'w') as f:
                         f.write(test_value)
                     self.has_admin_rights = True
-                    logger.info("✅ صلاحيات كتابة متاحة مباشرة")
+                    logger.info("صلاحيات كتابة متاحة مباشرة")
                 except PermissionError:
                     self.has_admin_rights = False
                 except:
@@ -114,7 +114,7 @@ class PermissionManager:
     
     def _request_linux_sudo(self, parent_widget) -> bool:
         """طلب كلمة مرور sudo في Linux"""
-        logger.info("📋 عرض نافذة طلب صلاحيات sudo...")
+        logger.info("عرض نافذة طلب صلاحيات sudo...")
         
         dialog = SudoPasswordDialog(parent_widget)
         dialog.show()  # إظهار النافذة أولاً
@@ -122,7 +122,7 @@ class PermissionManager:
         dialog.activateWindow()  # تفعيلها
         
         result = dialog.exec()
-        logger.info(f"📋 نتيجة نافذة sudo: {result}")
+        logger.info(f"نتيجة نافذة sudo: {result}")
         
         if result == QDialog.DialogCode.Accepted:
             password = dialog.get_password()
@@ -135,7 +135,7 @@ class PermissionManager:
             if self._test_sudo_password(password):
                 self.sudo_password = password
                 self.has_admin_rights = True
-                logger.info("✅ تم الحصول على صلاحيات sudo بنجاح")
+                logger.info("تم الحصول على صلاحيات sudo بنجاح")
                 
                 # حفظ في متغير بيئة الجلسة (آمن)
                 os.environ['BATTERYGUARD_SUDO_VERIFIED'] = '1'
@@ -216,7 +216,7 @@ class SudoPasswordDialog(QDialog):
         layout.setContentsMargins(30, 30, 30, 30)
         
         # العنوان
-        title = QLabel("🔐 صلاحيات المسؤول")
+        title = QLabel("صلاحيات المسؤول")
         title.setStyleSheet("""
             font-size: 20px;
             font-weight: 700;
@@ -260,7 +260,7 @@ class SudoPasswordDialog(QDialog):
         button_layout = QVBoxLayout()
         button_layout.setSpacing(10)
         
-        ok_button = QPushButton("✓ تأكيد")
+        ok_button = QPushButton("تأكيد")
         ok_button.setMinimumHeight(45)
         ok_button.setStyleSheet("""
             QPushButton {
@@ -280,7 +280,7 @@ class SudoPasswordDialog(QDialog):
         ok_button.clicked.connect(self.accept)
         button_layout.addWidget(ok_button)
         
-        cancel_button = QPushButton("✗ إلغاء")
+        cancel_button = QPushButton("إلغاء")
         cancel_button.setMinimumHeight(45)
         cancel_button.setStyleSheet("""
             QPushButton {

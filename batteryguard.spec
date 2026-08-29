@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# BatteryGuard Pro - PyInstaller Spec File
+# BatteryGuardAI - PyInstaller Spec File
 
 import sys
 import os
@@ -32,8 +32,15 @@ json_files = [
     ('auto_optimizer_settings.json', '.'),
 ]
 
+# ملفات الترجمة - بدونها تظهر الواجهة بمفاتيحها الخام
+locale_files = []
+locales_dir = Path('locales')
+if locales_dir.exists():
+    for locale_file in locales_dir.glob('*.json'):
+        locale_files.append((str(locale_file), 'locales'))
+
 # تجميع كل الملفات
-all_datas = sound_files + asset_files
+all_datas = sound_files + asset_files + locale_files
 for json_file, dest in json_files:
     if Path(json_file).exists():
         all_datas.append((json_file, dest))
@@ -47,6 +54,14 @@ a = Analysis(
         'PyQt6.QtCore',
         'PyQt6.QtGui',
         'PyQt6.QtWidgets',
+        # طبقات التصميم والعلم والقدرات
+        'theme',
+        'icons',
+        'panel_widgets',
+        'i18n',
+        'battery_science',
+        'hardware_capability',
+        'ui_components',
         'psutil',
         'json',
         'pathlib',
@@ -73,7 +88,6 @@ a = Analysis(
         'actionable_notification_dialog',
         'welcome_dialog',
         'default_settings',
-        'app_colors',
         'resource_path',
         'notification_manager',
         'battery_monitor',
