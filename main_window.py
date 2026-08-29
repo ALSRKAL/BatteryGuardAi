@@ -8,12 +8,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import QSettings, Qt, QTimer
+from PyQt6.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
                              QMainWindow, QPushButton, QTabWidget, QTextEdit,
                              QVBoxLayout, QWidget)
 
+import diagnostics
 import icons
 import theme
 from auto_optimizer import AutoOptimizer
@@ -23,7 +24,7 @@ from battery_monitor import BatteryMonitor
 from battery_science import (END_OF_LIFE_SOH, OPTIMAL_WINDOW, SOURCES,
                              ceiling_saving_percent_per_year, stress_index)
 from battery_optimizer import BatteryOptimizer
-from default_settings import APP_VERSION
+from default_settings import APP_NAME, APP_ORG, APP_VERSION
 from i18n import is_rtl, t
 from monitor_thread import MonitorThread
 from notification_manager import SmartNotificationManager
@@ -31,10 +32,27 @@ from panel_widgets import ChargeWindowJaw, EngravedRail
 from permission_manager import PermissionManager
 from resource_path import get_data_path, get_resource_path
 from tray_icon import BatteryTrayIcon
-from ui_components import (AnalysisTab, ControlTab, RecordTab, SettingsTab,
-                           StatusTab)
+from ui_components import (AnalysisTab, ControlTab, DiagnosticsTab, RecordTab,
+                           SettingsTab, StatusTab)
 
 logger = logging.getLogger('BatteryGuard')
+
+
+class _DiagnosticsWorker(QThread):
+    """
+    يشغّل الفحص العميق بعيداً عن خيط الواجهة: الفحص يقرأ عشرات المسارات
+    ويستدعي أدوات خارجية، وتجميد الواجهة ثانيتين عيب لا عذر له.
+    """
+
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def run(self):
+        try:
+            self.finished.emit(diagnostics.run(deep=True))
+        except Exception as e:  # الفحص لا يجوز أن يُسقط التطبيق
+            logger.error(f"خطأ في خيط التشخيص: {e}", exc_info=True)
+            self.failed.emit(str(e))
 
 
 class ModernUI(QMainWindow):
@@ -42,15 +60,22 @@ class ModernUI(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.settings = QSettings('BatteryGuard', 'Pro')
+        self.settings = QSettings(APP_ORG, APP_NAME)
         self.permission_manager = PermissionManager()
         self.monitor = BatteryMonitor()
         self.ai = BatteryAI()
         self.notification_manager = SmartNotificationManager()
         self.optimizer = BatteryOptimizer(ai_engine=self.ai)
         self.auto_optimizer = AutoOptimizer(self.optimizer, self.ai)
-        self.is_dark_mode = True
-        
+
+        # حالة التشخيص العميق
+        self._diagnostics_report = None
+        self._diagnostics_worker = None
+        self._diagnostics_running = False
+        self._last_diagnostics_finding = None
+        self._last_notified_advice = None
+        self._trace_started = None
+
         # تمرير كلمة مرور sudo إذا كانت متوفرة من البداية
         self._sync_permissions()
         
@@ -63,6 +88,9 @@ class ModernUI(QMainWindow):
         self.load_settings()
         self._load_log_from_file()
         self.start_monitoring()
+
+        # فحص أول بعد استقرار الواجهة: يحدّد نمط الجهاز وقدراته الحقيقية
+        QTimer.singleShot(1500, self.run_diagnostics)
         
     def init_ui(self):
         """
@@ -113,13 +141,13 @@ class ModernUI(QMainWindow):
         # ── الجسم: عمود واحد محدود العرض حتى لا تتمدد اللوحة بلا نظام ──
         body_host = QWidget()
         host_layout = QHBoxLayout(body_host)
-        host_layout.setContentsMargins(theme.SPACE_5, theme.SPACE_4,
-                                       theme.SPACE_5, theme.SPACE_4)
+        host_layout.setContentsMargins(theme.SPACE_4, theme.SPACE_3,
+                                       theme.SPACE_4, theme.SPACE_3)
         host_layout.setSpacing(0)
 
+        # المحتوى يملأ العرض المتاح؛ الكثافة تُدار داخل كل مجال بشبكة متكيّفة
         body = QWidget()
-        body.setMaximumWidth(theme.MAX_CONTENT_WIDTH)
-        host_layout.addWidget(body, 1, Qt.AlignmentFlag.AlignHCenter)
+        host_layout.addWidget(body, 1)
 
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
@@ -137,6 +165,9 @@ class ModernUI(QMainWindow):
 
         self.ai_tab = AnalysisTab.create(self)
         self.tabs.addTab(self.ai_tab, t('tab.intelligence'))
+
+        self.diagnostics_tab = DiagnosticsTab.create(self)
+        self.tabs.addTab(self.diagnostics_tab, t('diag.title'))
 
         self.stats_tab = RecordTab.create(self)
         self.tabs.addTab(self.stats_tab, t('tab.record'))
@@ -346,53 +377,102 @@ class ModernUI(QMainWindow):
             self.remediation_plate.setVisible(bool(self.monitor.capability.remediation))
 
     def show_diagnostics(self) -> None:
-        """كل ما قُرئ من العتاد كما هو، بلا تجميل"""
-        from PyQt6.QtWidgets import QDialog, QDialogButtonBox
+        """الانتقال إلى مجال التشخيص، وتشغيل فحص إن لم يوجد تقرير بعد"""
+        self.tabs.setCurrentWidget(self.diagnostics_tab)
+        if self._diagnostics_report is None:
+            self.run_diagnostics()
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle(t('diag.title'))
-        dialog.resize(680, 520)
-        dialog.setStyleSheet(theme.stylesheet())
+    def run_diagnostics(self) -> None:
+        """
+        فحص عميق في خيط منفصل: يقرأ العتاد ويشغّل أدوات خارجية، ولا يجوز
+        أن يجمّد الواجهة أثناء ذلك.
+        """
+        if self._diagnostics_running:
+            return
+        self._diagnostics_running = True
+        self.diagnostics_panel.set_busy(True)
+        self.status_label.setText(t('diag.running'))
 
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(theme.SPACE_4, theme.SPACE_4, theme.SPACE_4, theme.SPACE_4)
-        layout.setSpacing(theme.SPACE_3)
+        worker = _DiagnosticsWorker(self)
+        worker.finished.connect(self._on_diagnostics_ready)
+        worker.failed.connect(self._on_diagnostics_failed)
+        self._diagnostics_worker = worker
+        worker.start()
 
-        heading = QLabel(t('diag.read_values'))
-        heading.setFont(theme.legend_font())
-        heading.setStyleSheet(f"color: {theme.INK_FAINT};")
-        layout.addWidget(heading)
+    def _on_diagnostics_ready(self, report) -> None:
+        """عرض التقرير: حكم عام، نتائج بأدلتها، وجدول خام"""
+        self._diagnostics_report = report
+        self._diagnostics_running = False
+        self.diagnostics_panel.set_busy(False)
 
-        report = QTextEdit()
-        report.setReadOnly(True)
-        report.setFont(theme.font(theme.SIZE_LABEL, 500, mono=True))
-        report.setPlainText(json.dumps(self.monitor.diagnostics(),
-                                       ensure_ascii=False, indent=2))
-        layout.addWidget(report, 1)
+        grade_colors = {
+            'ok': theme.STATE_OK,
+            'degraded': theme.STATE_WARN,
+            'impaired': theme.STATE_WARN,
+            'unmeasurable': theme.STATE_CRITICAL,
+            'unknown': theme.STATE_DEAD,
+        }
+        environment = report.environment
+        device = ' '.join(part for part in (environment.get('vendor'),
+                                            environment.get('product')) if part)
+        bios = f"BIOS {environment.get('bios_version', '')} " \
+               f"{environment.get('bios_date', '')}".strip()
+        meta = ' · '.join(part for part in (
+            f"{t('diag.device_mode')}: {t('diag.mode.' + report.device_mode)}",
+            device, bios, f"{t('diag.generated')}: {report.generated_at}") if part)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        export_button = buttons.addButton(t('diag.export'),
-                                         QDialogButtonBox.ButtonRole.ActionRole)
-        export_button.clicked.connect(lambda: self._export_diagnostics(report.toPlainText()))
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
+        findings = [{
+            'severity': finding.severity,
+            'title': t(finding.key, **finding.params),
+            'evidence': finding.evidence,
+            'remediation': [t(key) for key in finding.remediation],
+            'confidence': finding.confidence,
+        } for finding in report.findings]
 
-        dialog.exec()
+        self.diagnostics_panel.set_report(
+            t('diag.grade.' + report.grade),
+            grade_colors.get(report.grade, theme.STATE_DEAD),
+            meta, findings, diagnostics.readable_table(report))
 
-    def _export_diagnostics(self, payload: str) -> None:
-        """حفظ تقرير التشخيص بجوار بيانات التطبيق"""
+        top = report.top_finding
+        if top is not None:
+            self.log_event(f"{t('diag.title')}: {t(top.key, **top.params)}")
+            if top.severity in ('critical', 'warning') and \
+                    self._last_diagnostics_finding != top.id:
+                self._last_diagnostics_finding = top.id
+                self.notification_manager.send_notification(
+                    title=t('diag.title'),
+                    message=t(top.key, **top.params),
+                    urgency='critical' if top.severity == 'critical' else 'high',
+                    notification_type='health_warning', play_sound=True)
+        self.status_label.setText(t('diag.grade.' + report.grade))
+
+    def _on_diagnostics_failed(self, message: str) -> None:
+        """فشل الفحص لا يُسكت: يُسجَّل ويُعلن في شريط الحالة"""
+        self._diagnostics_running = False
+        self.diagnostics_panel.set_busy(False)
+        logger.error(f"فشل التشخيص: {message}")
+        self.status_label.setText(t('diag.unreadable'))
+
+    def export_diagnostics(self) -> None:
+        """حفظ التقرير الكامل: التصنيف والأدلة الخام معاً"""
+        if self._diagnostics_report is None:
+            self.run_diagnostics()
+            return
         try:
-            path = get_data_path('diagnostics_report.json')
-            Path(path).write_text(payload, encoding='utf-8')
+            path = Path(get_data_path('diagnostics_report.json'))
+            payload = {
+                'report': self._diagnostics_report.as_dict(),
+                'monitor': self.monitor.diagnostics(),
+                'raw_table': self.diagnostics_panel.raw_text().splitlines(),
+            }
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                            encoding='utf-8')
             self.status_label.setText(t('diag.exported', path=str(path)))
             self.log_event(t('diag.exported', path=str(path)))
-        except OSError as e:
+        except (OSError, TypeError, ValueError) as e:
             logger.error(f"تعذّر تصدير التشخيص: {e}")
             self.status_label.setText(t('diag.unreadable'))
-
-    # ══════════════════════════════════════════════════════
-    # إجراءات التوصيات
-    # ══════════════════════════════════════════════════════
 
     def handle_advice_action(self, action: str) -> None:
         """تنفيذ الإجراء المرافق للتوصية، أو إظهار المكان الذي يُنفّذ فيه"""
@@ -485,13 +565,22 @@ class ModernUI(QMainWindow):
             # المفاتيح الخام هي معرّفات الخانات، لا النصوص المترجمة
             temp = battery_status.get('temperature')
             draw = battery_status.get('power_draw', 0) or 0
+            cycles_value = health.get('cycle_count')
+            stress = stress_index(percent, temp, is_charging, percent >= ceiling) \
+                if reporting else None
             self.state_plate.set_measures([
                 ('bolt', 'status.draw',
                  f"{draw:.1f} {t('unit.watt')}" if draw > 0.1 else '—'),
                 ('thermometer', 'status.temperature',
-                 f"{temp:.1f} {t('unit.celsius')}" if temp is not None else '—'),
+                 f"{temp:.1f} {t('unit.celsius')}" if temp is not None
+                 else t('status.assumed_temp', temp=25)),
                 ('pulse', 'health.title',
                  f"{soh:.0f} {t('unit.percent')}" if soh is not None else t('health.unknown')),
+                ('cycle', 'health.cycles', str(cycles_value) if cycles_value else '—'),
+                ('plug', 'field.status', t(battery_status.get('status_key', 'status.reading'))),
+                ('gauge', 'status.stress',
+                 f"{stress['index']:.0f} · {t('stress.' + stress['band'])}"
+                 if stress else '—'),
             ])
             self._trace_sample(percent)
 
@@ -621,6 +710,40 @@ class ModernUI(QMainWindow):
         )
         self._render_wear(projection, stress, battery_status)
         self._render_learning(projection)
+        self._render_summary(battery_status, health)
+
+    def _render_summary(self, battery_status: Dict, health: Dict) -> None:
+        """ملخص الجهاز: حقائق مقروءة من العتاد والتشخيص، لا فراغ"""
+        capability = self.monitor.capability
+        report = self._diagnostics_report
+        floor, ceiling = self.current_window()
+
+        self._set_measure('summary_device_label',
+                          ' '.join(part for part in (capability.vendor,
+                                                     capability.product) if part) or '—')
+        self._set_measure('summary_mode_label',
+                          t('diag.mode.' + report.device_mode) if report else '—')
+        self._set_measure('summary_tier_label', t('tier.' + capability.tier),
+                          theme.TIER_COLORS.get(capability.tier, theme.INK_DIM))
+
+        mains_online = (report.mains.get('online') if report else None)
+        self._set_measure('summary_mains_label',
+                          t('status.on_mains') if mains_online
+                          else t('status.discharging') if mains_online is False else '—')
+
+        zones = diagnostics.plausible_zones(report.thermal) if report else []
+        hottest = max(zones, key=lambda zone: zone['celsius']) if zones else None
+        self._set_measure('summary_thermal_label',
+                          f"{hottest['celsius']:.0f} {t('unit.celsius')} · {hottest['type']}"
+                          if hottest else '—')
+
+        self._set_measure('summary_control_label',
+                          t('control.active') if self.monitor.control_verified
+                          else t('control.inactive'))
+        self._set_measure('summary_window_label',
+                          f"{floor}–{ceiling} {t('unit.percent')}")
+        self._set_measure('summary_samples_label',
+                          str(len(self.ai.usage_history)))
 
     def _render_advice(self, advice: List) -> None:
         """عرض التوصيات في الطبقة العليا وفي مجال التحليل"""
@@ -640,6 +763,19 @@ class ModernUI(QMainWindow):
                 'evidence': evidence,
                 'action': item.action or '',
             })
+
+        # بطارية غير قابلة للقياس: نتائج التشخيص هي المحتوى المفيد الوحيد
+        # في هذه الحالة، فتُضاف بدل ترك المجال بسطر واحد.
+        report = self._diagnostics_report
+        if report is not None and report.grade in ('unmeasurable', 'impaired'):
+            for finding in report.findings[:3]:
+                if finding.severity in ('critical', 'warning', 'advice'):
+                    rows.append({
+                        'severity': finding.severity,
+                        'text': t(finding.key, **finding.params),
+                        'evidence': t('diag.confidence', value=finding.confidence),
+                        'action': 'open_diagnostics',
+                    })
 
         # الطبقة العليا تحمل أهم صفّين فقط، والمجال يحمل القائمة كاملة
         compact = getattr(self, 'advice_layer', None)

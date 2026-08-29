@@ -22,7 +22,8 @@ from PyQt6.QtCore import (QEasingCurve, QPointF, QRect, QRectF, Qt,
 from PyQt6.QtGui import (QColor, QFontMetrics, QPainter, QPainterPath, QPen,
                          QPolygonF)
 from PyQt6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel,
-                             QPushButton, QSizePolicy, QVBoxLayout, QWidget)
+                             QPushButton, QSizePolicy, QTextEdit, QVBoxLayout,
+                             QWidget)
 
 import icons
 import theme
@@ -204,6 +205,58 @@ class PhosphorTrace(QWidget):
         painter.end()
 
 
+class ResponsiveGrid(QWidget):
+    """
+    شبكة تعيد توزيع عناصرها حسب العرض المتاح فعلاً: عمود واحد على نافذة
+    ضيّقة، وحتى أربعة أعمدة على شاشة عريضة. هذا ما يمنع الفراغ الكبير على
+    الشاشات الكبيرة بدل تمديد عنصر واحد بلا داعٍ.
+    """
+
+    def __init__(self, min_column_width: int = 300, max_columns: int = 4,
+                 parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._min_column_width = int(min_column_width)
+        self._max_columns = int(max_columns)
+        self._items: List[QWidget] = []
+        self._columns = 0
+
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(theme.SPACE_4)
+        self._grid.setVerticalSpacing(theme.SPACE_2)
+
+    def add(self, widget: QWidget) -> None:
+        self._items.append(widget)
+        self._relayout(force=True)
+
+    def clear(self) -> None:
+        for widget in self._items:
+            self._grid.removeWidget(widget)
+            widget.deleteLater()
+        self._items.clear()
+        self._columns = 0
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._relayout()
+
+    def _relayout(self, force: bool = False) -> None:
+        if not self._items:
+            return
+        available = max(self.width(), self._min_column_width)
+        columns = max(1, min(self._max_columns, available // self._min_column_width))
+        if columns == self._columns and not force:
+            return
+        self._columns = columns
+
+        for widget in self._items:
+            self._grid.removeWidget(widget)
+        for index, widget in enumerate(self._items):
+            self._grid.addWidget(widget, index // columns, index % columns)
+        for column in range(self._max_columns):
+            self._grid.setColumnStretch(column, 1 if column < columns else 0)
+
+
 class _MeasureCell(QWidget):
     """قياس ثانوي على حقل الحالة: أيقونة، تسمية، قيمة - في تخطيط حقيقي"""
 
@@ -252,6 +305,9 @@ class StatePlate(QFrame):
         ('bolt', 'status.draw'),
         ('thermometer', 'status.temperature'),
         ('pulse', 'health.title'),
+        ('cycle', 'health.cycles'),
+        ('plug', 'field.status'),
+        ('gauge', 'status.stress'),
     )
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -311,19 +367,14 @@ class StatePlate(QFrame):
         top.addWidget(reading_host, 0, Qt.AlignmentFlag.AlignTop)
         top.addStretch(1)
 
-        # ── القياسات الثانوية: عمود بعرض ثابت لا يزاحم القراءة ──
-        measures_host = QWidget()
-        measures_host.setFixedWidth(216)
-        measures_column = QVBoxLayout(measures_host)
-        measures_column.setContentsMargins(0, 0, 0, 0)
-        measures_column.setSpacing(theme.SPACE_3)
+        # ── القياسات الثانوية: تتوزّع على أعمدة حسب العرض المتاح ──
+        measures_grid = ResponsiveGrid(min_column_width=210, max_columns=3)
         self.measure_cells: Dict[str, _MeasureCell] = {}
         for icon_name, key in self.MEASURE_SLOTS:
             cell = _MeasureCell(icon_name, t(key))
             self.measure_cells[key] = cell
-            measures_column.addWidget(cell)
-        measures_column.addStretch(1)
-        top.addWidget(measures_host, 0, Qt.AlignmentFlag.AlignTop)
+            measures_grid.add(cell)
+        top.addWidget(measures_grid, 1, Qt.AlignmentFlag.AlignTop)
 
         outer.addLayout(top)
 
@@ -751,30 +802,39 @@ class AdviceRow(_Plate):
         mark.setFixedWidth(20)
         mark.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
 
-        body = QVBoxLayout()
+        # حاوية محدودة العرض بدل تحديد عرض التسمية نفسها: التسمية الملتفّة
+        # داخل تخطيط أوسع تحسب ارتفاعها على العرض الكامل ثم تُقصّ.
+        holder = QWidget()
+        holder.setMaximumWidth(theme.MAX_TEXT_WIDTH)
+        body = QVBoxLayout(holder)
+        body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(3)
+
         message = QLabel(text)
         message.setWordWrap(True)
         message.setFont(theme.font(theme.SIZE_BODY, 500))
-        # السطر الطويل لا يُقرأ: عمود النص محدود العرض على الشاشات العريضة
-        message.setMaximumWidth(theme.MAX_TEXT_WIDTH)
         body.addWidget(message)
 
         if evidence:
             source = QLabel(evidence)
-            source.setFont(theme.legend_font(10))
+            source.setFont(theme.legend_font(11))
             source.setStyleSheet(f"color: {theme.INK_FAINT};")
             source.setOpenExternalLinks(True)
             source.setTextFormat(Qt.TextFormat.RichText)
+            source.setWordWrap(True)
             body.addWidget(source)
 
         layout.addWidget(mark)
-        layout.addLayout(body, 1)
+        layout.addWidget(holder, 1)
+
+        layout.addStretch(1)
 
         if action:
             button = QPushButton(t(f'action.{action}'))
             button.setProperty('role', 'live' if severity in ('critical', 'warning') else 'quiet')
             button.setCursor(Qt.CursorShape.PointingHandCursor)
+            # الزر لا يتمدد: عرضه من نصّه، والفراغ يذهب للمساحة لا للزر
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             button.clicked.connect(lambda: self.actionTriggered.emit(action))
             layout.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
 
@@ -815,3 +875,193 @@ class AdviceLayer(QWidget):
             row.actionTriggered.connect(self.actionTriggered.emit)
             self._layout.addWidget(row)
             self._rows.append(row)
+
+
+# ═══════════════════════════════════════════════════════════
+# لوحة التشخيص
+# ═══════════════════════════════════════════════════════════
+
+class FindingCard(_Plate):
+    """
+    نتيجة تشخيص واحدة: علامة الشدّة، الحكم، الأدلة الخام كما قُرئت، خطوات
+    المعالجة، ودرجة الثقة. الأدلة ليست تفصيلاً ثانوياً: هي ما يجعل الحكم
+    قابلاً للتحقق بدل أن يكون رأياً.
+    """
+
+    def __init__(self, severity: str, title: str, evidence: List[str],
+                 remediation: List[str], confidence: int,
+                 parent: Optional[QWidget] = None):
+        super().__init__('groove', parent)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(theme.SPACE_3, theme.SPACE_3, theme.SPACE_3, theme.SPACE_3)
+        layout.setSpacing(theme.SPACE_2)
+
+        header = QHBoxLayout()
+        header.setSpacing(theme.SPACE_2)
+        mark = QLabel()
+        mark.setPixmap(icons.pixmap(icons.SEVERITY_ICONS.get(severity, 'info'), 18,
+                                    theme.SEVERITY_COLORS.get(severity, theme.INK_DIM)))
+        mark.setFixedWidth(20)
+        mark.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+
+        message = QLabel(title)
+        message.setWordWrap(True)
+        message.setFont(theme.font(theme.SIZE_BODY, 600))
+
+        badge = QLabel(t('diag.confidence', value=int(confidence)))
+        badge.setFont(theme.legend_font(11))
+        badge.setStyleSheet(f"color: {theme.INK_FAINT};")
+
+        header.addWidget(mark)
+        header.addWidget(message, 1)
+        header.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(header)
+
+        if evidence:
+            evidence_label = QLabel('\n'.join(evidence))
+            evidence_label.setFont(theme.font(theme.SIZE_LABEL, 500, mono=True))
+            evidence_label.setStyleSheet(f"color: {theme.PHOSPHOR};")
+            evidence_label.setWordWrap(True)
+            layout.addWidget(evidence_label)
+
+        for step in remediation:
+            row = QHBoxLayout()
+            row.setSpacing(theme.SPACE_2)
+            bullet = QLabel()
+            bullet.setPixmap(icons.pixmap('chevron', 13, theme.INK_FAINT))
+            bullet.setFixedWidth(15)
+            bullet.setAlignment(Qt.AlignmentFlag.AlignTop)
+            text = QLabel(step)
+            text.setWordWrap(True)
+            text.setFont(theme.font(theme.SIZE_LABEL, 500))
+            text.setStyleSheet(f"color: {theme.INK_DIM};")
+            row.addWidget(bullet)
+            row.addWidget(text, 1)
+            layout.addLayout(row)
+
+
+class DiagnosticsPanel(QWidget):
+    """
+    لوحة التشخيص: تقدير عام، نمط الجهاز، نتائج مصنَّفة بأدلتها، وجدول خام
+    لكل ما قُرئ. تعمل بلا بطارية أيضاً: الغياب نفسه نتيجة.
+    """
+
+    scanRequested = pyqtSignal()
+    exportRequested = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.SPACE_3)
+
+        # ── الحكم العام ──
+        summary = _Plate('plate')
+        summary_layout = QVBoxLayout(summary)
+        summary_layout.setContentsMargins(theme.SPACE_4, theme.SPACE_3,
+                                          theme.SPACE_4, theme.SPACE_3)
+        summary_layout.setSpacing(theme.SPACE_2)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(theme.SPACE_3)
+        self.grade_label = QLabel(t('diag.grade.unknown'))
+        self.grade_label.setFont(theme.font(theme.SIZE_SECTION, 700))
+        self.grade_label.setWordWrap(True)
+        top_row.addWidget(self.grade_label, 1)
+
+        self.scan_button = QPushButton(t('diag.run'))
+        self.scan_button.setProperty('role', 'live')
+        self.scan_button.setIcon(icons.icon('crosshair', 15, theme.INK_ON_FIELD))
+        self.scan_button.clicked.connect(self.scanRequested.emit)
+        top_row.addWidget(self.scan_button, 0)
+
+        self.export_button = QPushButton(t('diag.export'))
+        self.export_button.setProperty('role', 'quiet')
+        self.export_button.setIcon(icons.icon('copy', 14, theme.INK_DIM))
+        self.export_button.clicked.connect(self.exportRequested.emit)
+        top_row.addWidget(self.export_button, 0)
+        summary_layout.addLayout(top_row)
+
+        self.meta_label = QLabel('')
+        self.meta_label.setFont(theme.font(theme.SIZE_LABEL, 500, mono=True))
+        self.meta_label.setStyleSheet(f"color: {theme.INK_DIM};")
+        self.meta_label.setWordWrap(True)
+        summary_layout.addWidget(self.meta_label)
+        layout.addWidget(summary)
+
+        # ── النتائج ──
+        findings_plate = _Plate('plate')
+        findings_layout = QVBoxLayout(findings_plate)
+        findings_layout.setContentsMargins(theme.SPACE_4, theme.SPACE_3,
+                                           theme.SPACE_4, theme.SPACE_4)
+        findings_layout.setSpacing(theme.SPACE_2)
+
+        findings_title = QLabel(t('diag.findings'))
+        findings_title.setFont(theme.legend_font())
+        findings_title.setStyleSheet(f"color: {theme.INK_FAINT};")
+        findings_layout.addWidget(findings_title)
+
+        self.empty_label = QLabel(t('diag.no_findings'))
+        self.empty_label.setFont(theme.font(theme.SIZE_BODY, 500))
+        self.empty_label.setStyleSheet(f"color: {theme.INK_FAINT};")
+        self.empty_label.setWordWrap(True)
+        findings_layout.addWidget(self.empty_label)
+
+        self.findings_grid = ResponsiveGrid(min_column_width=420, max_columns=2)
+        findings_layout.addWidget(self.findings_grid)
+        layout.addWidget(findings_plate)
+
+        # ── الجدول الخام ──
+        raw_plate = _Plate('plate')
+        raw_layout = QVBoxLayout(raw_plate)
+        raw_layout.setContentsMargins(theme.SPACE_4, theme.SPACE_3,
+                                      theme.SPACE_4, theme.SPACE_4)
+        raw_layout.setSpacing(theme.SPACE_2)
+
+        raw_title = QLabel(t('diag.raw'))
+        raw_title.setFont(theme.legend_font())
+        raw_title.setStyleSheet(f"color: {theme.INK_FAINT};")
+        raw_layout.addWidget(raw_title)
+
+        self.raw_view = QTextEdit()
+        self.raw_view.setReadOnly(True)
+        self.raw_view.setMinimumHeight(220)
+        self.raw_view.setFont(theme.font(theme.SIZE_LABEL, 500, mono=True))
+        self.raw_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        raw_layout.addWidget(self.raw_view)
+        layout.addWidget(raw_plate)
+
+    # ── العرض ───────────────────────────────────────────────
+
+    def set_busy(self, busy: bool) -> None:
+        self.scan_button.setEnabled(not busy)
+        self.scan_button.setText(t('diag.running') if busy else t('diag.run'))
+
+    def set_report(self, grade_text: str, grade_color: str, meta: str,
+                   findings: List[Dict], raw_rows: List[tuple]) -> None:
+        self.grade_label.setText(grade_text)
+        self.grade_label.setStyleSheet(f"color: {grade_color};")
+        self.meta_label.setText(meta)
+
+        self.findings_grid.clear()
+        self.empty_label.setVisible(not findings)
+        for finding in findings:
+            self.findings_grid.add(FindingCard(
+                finding.get('severity', 'info'),
+                finding.get('title', ''),
+                finding.get('evidence') or [],
+                finding.get('remediation') or [],
+                int(finding.get('confidence', 0)),
+            ))
+
+        width = max((len(row[0]) for row in raw_rows), default=24) + 2
+        lines = []
+        for path, value, status in raw_rows:
+            marker = '' if status == 'ok' else f"  [{status}]"
+            lines.append(f"{path.ljust(width)}{value}{marker}")
+        self.raw_view.setPlainText('\n'.join(lines))
+
+    def raw_text(self) -> str:
+        return self.raw_view.toPlainText()

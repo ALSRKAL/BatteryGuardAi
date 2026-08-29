@@ -20,6 +20,9 @@ class TestCooldownLogic:
         assert mgr._should_send_notification('battery_critical', 'critical') is True
 
     def test_cooldown_suppresses_repeats(self, mgr):
+        # ساعات الهدوء تُعطَّل صراحةً: الاختبار عن التهدئة لا عن الوقت،
+        # وكان يفشل عند تشغيله فعلياً بين الواحدة والسادسة صباحاً.
+        mgr.smart_timing_enabled = False
         assert mgr._should_send_notification('type_a', 'normal') is True
         mgr.last_notification_time['type_a'] = time.time()
         assert mgr._should_send_notification('type_a', 'normal') is False

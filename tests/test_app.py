@@ -80,7 +80,7 @@ class TestAppSmoke:
         try:
             # خمسة مجالات مستقلة: الحالة، التحكم، التحليل، السجل، الإعدادات
             expected = [t('tab.status'), t('tab.control'), t('tab.intelligence'),
-                        t('tab.record'), t('tab.settings')]
+                        t('diag.title'), t('tab.record'), t('tab.settings')]
             assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == expected
             assert window.monitor_thread is not None
             assert window.ai is not None
@@ -88,6 +88,7 @@ class TestAppSmoke:
             assert window.state_plate is not None
             assert window.charge_window_jaw is not None
             assert window.capability_strip is not None
+            assert window.diagnostics_panel is not None
         finally:
             window.ai_timer.stop()
             window.auto_save_timer.stop()

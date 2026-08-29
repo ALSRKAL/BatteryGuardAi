@@ -21,6 +21,8 @@ from typing import Callable, Dict, List, Optional
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
+from default_settings import DEFAULT_SETTINGS
+
 try:
     from resource_path import get_resource_path
 except ImportError:  # pragma: no cover
@@ -122,6 +124,9 @@ class SmartNotificationManager:
         self.last_notification_time: Dict[str, float] = {}
         self.notification_cooldown = 300
         self.smart_timing_enabled = True
+        # ساعات الهدوء قابلة للضبط؛ كانت مثبتة في الشرط فتُهمل إعدادات المستخدم
+        self.quiet_hours_start = int(DEFAULT_SETTINGS.get('quiet_hours_start', 1))
+        self.quiet_hours_end = int(DEFAULT_SETTINGS.get('quiet_hours_end', 6))
         self.ai_recommendations_enabled = True
 
         # التذكيرات
@@ -465,11 +470,28 @@ class SmartNotificationManager:
         if time.time() - last_time < self.notification_cooldown:
             return False
 
-        if self.smart_timing_enabled:
-            current_hour = datetime.now().hour
-            if current_hour in (1, 2, 3, 4, 5, 6):
-                return False
+        if self.smart_timing_enabled and self.in_quiet_hours():
+            return False
         return True
+
+    def in_quiet_hours(self, hour: Optional[int] = None) -> bool:
+        """
+        هل نحن داخل ساعات الهدوء المضبوطة؟ يدعم النطاق العابر لمنتصف الليل
+        (مثال 22 إلى 6) بدل قائمة ساعات مثبتة.
+        """
+        current = datetime.now().hour if hour is None else int(hour)
+        start, end = self.quiet_hours_start, self.quiet_hours_end
+        if start == end:
+            return False
+        if start < end:
+            return start <= current < end
+        return current >= start or current < end
+
+    def set_quiet_hours(self, start: int, end: int) -> None:
+        """ضبط ساعات الهدوء من إعدادات المستخدم"""
+        self.quiet_hours_start = max(0, min(23, int(start)))
+        self.quiet_hours_end = max(0, min(23, int(end)))
+        logger.info(f"ساعات الهدوء: {self.quiet_hours_start} إلى {self.quiet_hours_end}")
 
     def _send_immediate(self, notification: Dict) -> bool:
         """تنفيذ الإرسال الفوري مع الصوت"""

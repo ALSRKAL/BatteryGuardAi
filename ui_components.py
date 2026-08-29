@@ -23,7 +23,7 @@ import icons
 import theme
 from i18n import t
 from panel_widgets import (AdviceLayer, CapabilityStrip, ChargeWindowJaw,
-                           StatePlate)
+                           DiagnosticsPanel, ResponsiveGrid, StatePlate)
 
 logger = logging.getLogger('BatteryGuard')
 
@@ -63,6 +63,20 @@ def _plate(title_key: str) -> Tuple[QFrame, QVBoxLayout]:
     layout.setSpacing(theme.SPACE_3)
     layout.addWidget(_legend(t(title_key)))
     return plate, layout
+
+
+def _measure_block(parent, rows: List[Tuple[str, str, str]],
+                   min_column_width: int = 260) -> ResponsiveGrid:
+    """
+    كتلة قياسات تتوزّع على أعمدة حسب العرض المتاح، وتسجّل كل تسمية قيمة
+    على `parent` بالاسم المتفق عليه.
+    """
+    grid = ResponsiveGrid(min_column_width=min_column_width, max_columns=4)
+    for icon_name, key, attr in rows:
+        row_widget, value_label = _measure_row(icon_name, key)
+        setattr(parent, attr, value_label)
+        grid.add(row_widget)
+    return grid
 
 
 def _measure_row(icon_name: str, label_key: str,
@@ -154,6 +168,20 @@ class StatusTab:
         advice_layout.addWidget(parent.advice_layer)
         layout.addWidget(advice_plate)
 
+        # ── ملخص الجهاز: يعمّر المساحة بحقائق لا بفراغ ──
+        summary_plate, summary_layout = _plate('summary.title')
+        summary_layout.addWidget(_measure_block(parent, [
+            ('crosshair', 'summary.device', 'summary_device_label'),
+            ('info', 'diag.device_mode', 'summary_mode_label'),
+            ('shield', 'capability.title', 'summary_tier_label'),
+            ('plug', 'summary.mains', 'summary_mains_label'),
+            ('thermometer', 'summary.hottest_zone', 'summary_thermal_label'),
+            ('gear', 'summary.control_state', 'summary_control_label'),
+            ('jaw', 'window.title', 'summary_window_label'),
+            ('chart', 'summary.samples', 'summary_samples_label'),
+        ], min_column_width=280))
+        layout.addWidget(summary_plate)
+
         layout.addStretch(1)
         return _scroll(page)
 
@@ -232,23 +260,14 @@ class ControlTab:
 
         # ── القياسات الحالية ──
         measures_plate, measures_layout = _plate('capability.measurable')
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(theme.SPACE_5)
-        grid.setVerticalSpacing(theme.SPACE_2)
-
-        rows = [
+        measures_layout.addWidget(_measure_block(parent, [
             ('clock', 'status.time_to_empty', 'time_remaining_label'),
             ('bolt', 'status.draw', 'power_draw_label'),
             ('pulse', 'health.soh', 'health_label'),
             ('cycle', 'health.cycles', 'cycle_count_label'),
             ('thermometer', 'status.temperature', 'temperature_label'),
             ('plug', 'field.status', 'charging_status'),
-        ]
-        for index, (icon_name, key, attr) in enumerate(rows):
-            row_widget, value_label = _measure_row(icon_name, key)
-            setattr(parent, attr, value_label)
-            grid.addWidget(row_widget, index // 2, index % 2)
-        measures_layout.addLayout(grid)
+        ]))
         layout.addWidget(measures_plate)
 
         # ── المحسّن ──
@@ -285,22 +304,14 @@ class AnalysisTab:
         layout.addWidget(advice_plate)
 
         wear_plate, wear_layout = _plate('health.annual_loss')
-        wear_grid = QGridLayout()
-        wear_grid.setHorizontalSpacing(theme.SPACE_5)
-        wear_grid.setVerticalSpacing(theme.SPACE_2)
-        wear_rows = [
+        wear_layout.addWidget(_measure_block(parent, [
             ('chart', 'record.calendar_loss', 'calendar_loss_label'),
             ('cycle', 'record.cyclic_loss', 'cyclic_loss_label'),
             ('gauge', 'status.stress', 'stress_label'),
             ('clock', 'health.eol_row', 'eol_label'),
             ('cycle', 'record.equivalent_cycles', 'equivalent_cycles_label'),
             ('battery', 'record.high_soc_hours', 'high_soc_hours_label'),
-        ]
-        for index, (icon_name, key, attr) in enumerate(wear_rows):
-            row_widget, value_label = _measure_row(icon_name, key)
-            setattr(parent, attr, value_label)
-            wear_grid.addWidget(row_widget, index // 2, index % 2)
-        wear_layout.addLayout(wear_grid)
+        ]))
         layout.addWidget(wear_plate)
 
         prediction_plate, prediction_layout = _plate('record.confidence')
@@ -309,22 +320,14 @@ class AnalysisTab:
         parent.prediction_text.setWordWrap(True)
         prediction_layout.addWidget(parent.prediction_text)
 
-        learning_grid = QGridLayout()
-        learning_grid.setHorizontalSpacing(theme.SPACE_5)
-        learning_grid.setVerticalSpacing(theme.SPACE_2)
-        learning_rows = [
+        prediction_layout.addWidget(_measure_block(parent, [
             ('chart', 'record.samples', 'data_points_label'),
             ('crosshair', 'record.observed_days', 'patterns_found_label'),
             ('arrow_down', 'record.avg_drain', 'drain_rate_label'),
             ('arrow_up', 'record.avg_charge', 'charge_rate_label'),
             ('gauge', 'record.confidence', 'confidence_label'),
             ('pulse', 'health.soh', 'health_score_label'),
-        ]
-        for index, (icon_name, key, attr) in enumerate(learning_rows):
-            row_widget, value_label = _measure_row(icon_name, key)
-            setattr(parent, attr, value_label)
-            learning_grid.addWidget(row_widget, index // 2, index % 2)
-        prediction_layout.addLayout(learning_grid)
+        ]))
 
         # حقول يقرؤها التحديث القديم؛ تبقى مخفية بلا تكرار بصري
         for attr, text in (('efficiency_score_label', '—'),
@@ -345,14 +348,34 @@ class AnalysisTab:
         refresh_button.clicked.connect(parent.refresh_ai_analysis)
         actions.addWidget(refresh_button)
 
-        reset_button = QPushButton(t('diag.title'))
-        reset_button.setProperty('role', 'quiet')
-        reset_button.setIcon(icons.icon('crosshair', 15, theme.INK_DIM))
-        reset_button.clicked.connect(parent.show_diagnostics)
-        actions.addWidget(reset_button)
+        diagnostics_button = QPushButton(t('diag.title'))
+        diagnostics_button.setProperty('role', 'quiet')
+        diagnostics_button.setIcon(icons.icon('crosshair', 15, theme.INK_DIM))
+        diagnostics_button.clicked.connect(parent.show_diagnostics)
+        actions.addWidget(diagnostics_button)
         actions.addStretch(1)
         prediction_layout.addLayout(actions)
         layout.addWidget(prediction_plate)
+
+        layout.addStretch(1)
+        return _scroll(page)
+
+
+# ═══════════════════════════════════════════════════════════
+# مجال التشخيص
+# ═══════════════════════════════════════════════════════════
+
+class DiagnosticsTab:
+    """فحص عميق لمنظومة الطاقة، يعمل ببطارية أو بلا بطارية"""
+
+    @staticmethod
+    def create(parent) -> QScrollArea:
+        page, layout = _page()
+
+        parent.diagnostics_panel = DiagnosticsPanel()
+        parent.diagnostics_panel.scanRequested.connect(parent.run_diagnostics)
+        parent.diagnostics_panel.exportRequested.connect(parent.export_diagnostics)
+        layout.addWidget(parent.diagnostics_panel)
 
         layout.addStretch(1)
         return _scroll(page)
@@ -377,26 +400,15 @@ class RecordTab:
                                                          theme.SIZE_BODY, theme.INK_DIM)
         health_layout.addWidget(parent.health_status_label)
 
-        capacity_grid = QGridLayout()
-        capacity_grid.setHorizontalSpacing(theme.SPACE_5)
-        capacity_grid.setVerticalSpacing(theme.SPACE_2)
-        capacity_rows = [
+        health_layout.addWidget(_measure_block(parent, [
             ('battery', 'health.design_capacity', 'design_capacity_label'),
             ('battery', 'health.full_capacity', 'current_capacity_label'),
             ('alert', 'record.cyclic_loss', 'wear_level_label'),
             ('cycle', 'health.cycles', 'cycle_count_stats_label'),
-        ]
-        for index, (icon_name, key, attr) in enumerate(capacity_rows):
-            row_widget, value_label = _measure_row(icon_name, key)
-            setattr(parent, attr, value_label)
-            capacity_grid.addWidget(row_widget, index // 2, index % 2)
-        health_layout.addLayout(capacity_grid)
+        ]))
         layout.addWidget(health_plate)
 
         totals_plate, totals_layout = _plate('record.totals')
-        totals_grid = QGridLayout()
-        totals_grid.setHorizontalSpacing(theme.SPACE_5)
-        totals_grid.setVerticalSpacing(theme.SPACE_2)
         totals_rows = [
             ('bolt', 'record.total_charge_time', 'total_charge_time_label'),
             ('arrow_down', 'record.total_discharge_time', 'total_discharge_time_label'),
@@ -408,11 +420,7 @@ class RecordTab:
             ('gear', 'record.auto_opt_runs', 'auto_opt_count_label'),
             ('bolt', 'record.auto_opt_saved', 'auto_opt_power_saved_label'),
         ]
-        for index, (icon_name, key, attr) in enumerate(totals_rows):
-            row_widget, value_label = _measure_row(icon_name, key)
-            setattr(parent, attr, value_label)
-            totals_grid.addWidget(row_widget, index // 3, index % 3)
-        totals_layout.addLayout(totals_grid)
+        totals_layout.addWidget(_measure_block(parent, totals_rows))
         layout.addWidget(totals_plate)
 
         log_plate, log_layout = _plate('record.events')
