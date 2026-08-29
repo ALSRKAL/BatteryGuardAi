@@ -94,7 +94,7 @@ class BatteryOptimizer:
         }
         
         try:
-            # 🤖 التحليل الذكي قبل التحسين
+            # التحليل الذكي قبل التحسين
             if self.ai_engine and optimization_mode == 'intelligent':
                 ai_analysis = self._perform_ai_analysis()
                 results['ai_recommendations'] = ai_analysis.get('recommendations', [])
@@ -152,7 +152,7 @@ class BatteryOptimizer:
                 disk_result = self._optimize_disk()
             results['actions'].append(disk_result)
             
-            # 🚀 تحسينات متقدمة بالذكاء الاصطناعي
+            # تحسينات متقدمة بالذكاء الاصطناعي
             if optimization_mode == 'intelligent':
                 # 7. تحسين GPU والرسوميات
                 if self.ai_extensions:
@@ -178,7 +178,7 @@ class BatteryOptimizer:
             results['power_saved'] = total_saved
             self.power_saved_total += total_saved
             
-            # 🎯 التحسينات الشخصية بناءً على الذكاء الاصطناعي
+            # التحسينات الشخصية بناءً على الذكاء الاصطناعي
             if optimization_mode == 'intelligent':
                 if self.ai_extensions:
                     personalized = self.ai_extensions.apply_personalized_optimizations()
@@ -572,12 +572,12 @@ class BatteryOptimizer:
             
             # توصيات ذكية بناءً على الحالة
             if memory_usage > 80:
-                analysis['recommendations'].append("🧠 الذاكرة مكتظة - سيتم تنظيف عميق")
+                analysis['recommendations'].append("الذاكرة مكتظة - سيتم تنظيف عميق")
                 analysis['predicted_improvement'] += 15
                 analysis['priority_actions'].append('memory_deep_clean')
             
             if cpu_usage > 70:
-                analysis['recommendations'].append("⚡ المعالج محمّل - سيتم تحسين العمليات")
+                analysis['recommendations'].append("المعالج محمّل - سيتم تحسين العمليات")
                 analysis['predicted_improvement'] += 12
                 analysis['priority_actions'].append('cpu_optimization')
             
@@ -587,7 +587,7 @@ class BatteryOptimizer:
             current_hour = datetime.now().hour
             
             if current_hour in heavy_hours:
-                analysis['recommendations'].append("🎯 وقت استخدام مكثف - تحسين متقدم")
+                analysis['recommendations'].append("وقت استخدام مكثف - تحسين متقدم")
                 analysis['predicted_improvement'] += 8
                 analysis['priority_actions'].append('intensive_optimization')
             

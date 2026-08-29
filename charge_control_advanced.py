@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🔌 نظام التحكم المتقدم في الشحن - الجيل الثاني
+ نظام التحكم المتقدم في الشحن - الجيل الثاني
 يستخدم تقنيات متعددة للتحكم الفعلي في الشحن على Windows و Linux
 """
 
@@ -34,11 +34,11 @@ class AdvancedChargeController:
         
         # اكتشاف جميع الطرق المتاحة
         self.available_methods = self._detect_all_methods()
-        logger.info(f"✅ الطرق المتاحة: {', '.join(self.available_methods)}")
+        logger.info(f"الطرق المتاحة: {','.join(self.available_methods)}")
         
         # معلومات الجهاز
         self.device_info = self._detect_device_info()
-        logger.info(f"📱 الجهاز: {self.device_info.get('manufacturer', 'Unknown')}")
+        logger.info(f"الجهاز: {self.device_info.get('manufacturer', 'Unknown')}")
     
     def _detect_device_info(self) -> Dict:
         """اكتشاف معلومات الجهاز"""
@@ -215,10 +215,10 @@ class AdvancedChargeController:
             success, msg = self._apply_method(method, 'set_limit', max_limit)
             if success:
                 success_count += 1
-                messages.append(f"✅ {method}")
-                logger.info(f"✅ نجح: {method}")
+                messages.append(f"{method}")
+                logger.info(f"نجح: {method}")
             else:
-                messages.append(f"❌ {method}: {msg}")
+                messages.append(f"{method}: {msg}")
         
         if success_count > 0:
             return True, f"تم التفعيل بنجاح ({success_count} طريقة)"
@@ -254,7 +254,7 @@ class AdvancedChargeController:
                 
                 action_needed = {
                     'action': 'stop_charging',
-                    'message': f'{"✅ تم إيقاف الشحن" if success else "⚠️ افصل الشاحن يدوياً"} عند {self.max_charge_limit}%',
+                    'message': f'{"تم إيقاف الشحن" if success else "افصل الشاحن يدوياً"} عند {self.max_charge_limit}%',
                     'should_notify': True,
                     'urgency': 'critical' if not success else 'normal'
                 }
@@ -269,7 +269,7 @@ class AdvancedChargeController:
                 
                 action_needed = {
                     'action': 'start_charging',
-                    'message': f'🔌 وصّل الشاحن عند {self.min_charge_limit}%',
+                    'message': f'وصّل الشاحن عند {self.min_charge_limit}%',
                     'should_notify': True,
                     'urgency': 'normal'
                 }
@@ -294,7 +294,7 @@ class AdvancedChargeController:
             result, _ = self._apply_method(method, 'stop', None)
             if result:
                 success = True
-                logger.info(f"✅ نجح إيقاف الشحن عبر: {method}")
+                logger.info(f"نجح إيقاف الشحن عبر: {method}")
         
         return success
     
@@ -309,7 +309,7 @@ class AdvancedChargeController:
             result, _ = self._apply_method(method, 'start', None)
             if result:
                 success = True
-                logger.info(f"✅ نجح بدء الشحن عبر: {method}")
+                logger.info(f"نجح بدء الشحن عبر: {method}")
         
         return success
     
