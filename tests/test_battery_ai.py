@@ -414,6 +414,23 @@ class TestWorkCadence:
         assert len(writes) == 1, f'كُتب {len(writes)} مرة بدل مرة واحدة'
         assert ai._save_pending is True, 'يجب تسجيل أن هناك تغييراً غير محفوظ'
 
+    def test_first_save_passes_on_a_freshly_booted_machine(self, isolated_data_dir,
+                                                          monkeypatch):
+        """
+        مرجع `time.monotonic()` اعتباطي ويبدأ قريباً من الصفر بعد إقلاع نظيف.
+        استخدام 0.0 لتعني «لم يُحفظ بعد» كان يجعل `now - 0.0` أصغر من المهلة،
+        فيُرفض **أول** حفظ خلال أول خمس دقائق من عمر الجهاز ويُفقد تعلّم تلك
+        الدقائق. اكتُشف على عامل تكامل مستمر يبدأ من إقلاع نظيف، ولم يظهر على
+        جهاز عمل لأن ساعته تعدّ بالأيام.
+        """
+        import battery_ai as module
+
+        monkeypatch.setattr(module.time, 'monotonic', lambda: 0.5)
+        ai = BatteryAI()
+        assert ai._last_save_time is None, 'يجب أن تعني None: لم يُحفظ بعد'
+        assert ai.save_learning_data() is True, \
+            'رُفض أول حفظ على جهاز أُقلع للتوّ'
+
     def test_force_bypasses_rate_limit(self, isolated_data_dir):
         """
         مسار الإغلاق يجب أن يكتب دائماً: مهلة التقليل لا يجوز أن تُفقد

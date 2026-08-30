@@ -414,7 +414,6 @@ class TestEnforcement:
             only_on_battery=False, min_confidence=0, min_damage_score=0))
         try:
             name = target.name()
-            before = target.status()
             outcomes = instance.enforce(_report(name, pids=[target.pid]),
                                         DISCHARGING)
             time.sleep(0.3)
@@ -422,7 +421,11 @@ class TestEnforcement:
             assert outcomes and all(item.kind == ACTION_ALERT
                                     for item in outcomes)
             assert outcomes[0].reason == 'manual_mode'
-            assert target.status() == before
+            # المُختبَر هو ألّا تُعلَّق العملية. لا تُقارن الحالة حرفياً:
+            # `running` و`sleeping` تتبادلان مع جدولة النواة، فالمقارنة
+            # الحرفية تفشل عشوائياً لسبب لا علاقة له بالحارس.
+            assert target.status() != psutil.STATUS_STOPPED
+            assert not instance.active_interventions()
         finally:
             instance.stop()
 
@@ -457,12 +460,15 @@ class TestEnforcement:
             enabled=True, automatic=True, max_action=ACTION_SUSPEND,
             only_on_battery=False), dry_run=True)
         name = target.name()
-        before = target.status()
 
         outcome = instance.suspend(name, [target.pid])
         time.sleep(0.3)
         assert outcome.applied and outcome.reason == 'dry_run'
-        assert target.status() == before, 'وضع التجربة لمس العملية فعلاً'
+        # الحالة الحرفية تتبادل مع الجدولة؛ المُختبَر أنها لم تُعلَّق ولم
+        # يُسجَّل أي تدخّل نشط
+        assert target.status() != psutil.STATUS_STOPPED, \
+            'وضع التجربة علّق العملية فعلاً'
+        assert not instance.active_interventions()
 
 
 class TestOutcomeShape:

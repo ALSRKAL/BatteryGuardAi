@@ -106,8 +106,15 @@ class BatteryAI:
         # صحة العتاد الحقيقية (من sysfs/WMI) إن توفرت
         self._hardware_health: Optional[int] = None
 
-        # حرس الكتابة على القرص: آخر حفظ فعلي، وهل بقي تغيير غير محفوظ
-        self._last_save_time = 0.0
+        # حرس الكتابة على القرص: آخر حفظ فعلي، وهل بقي تغيير غير محفوظ.
+        #
+        # `None` تعني «لم يُحفظ في هذه الجلسة» ولا يجوز استبدالها بـ 0.0:
+        # مرجع `time.monotonic()` اعتباطي ويبدأ قريباً من الصفر على جهاز أُقلع
+        # للتوّ، فتصير المقارنة `now - 0.0 < MIN_SAVE_INTERVAL` صحيحة ويُرفض
+        # **أول** حفظ خلال أول خمس دقائق من عمر الجهاز. اكتُشف هذا على عامل
+        # تكامل مستمر يبدأ من إقلاع نظيف، وأثره على المستخدم أن التعلّم في أول
+        # دقائق كل إقلاع لا يُكتب.
+        self._last_save_time: Optional[float] = None
         self._save_pending = False
 
         # عدّاد عيّنات تصاعدي لا يتوقّف.
@@ -186,7 +193,9 @@ class BatteryAI:
         """
         now = time.monotonic()
         with self._lock:
-            if not force and (now - self._last_save_time) < MIN_SAVE_INTERVAL:
+            throttled = (self._last_save_time is not None
+                         and (now - self._last_save_time) < MIN_SAVE_INTERVAL)
+            if not force and throttled:
                 self._save_pending = True
                 return False
 
@@ -227,7 +236,7 @@ class BatteryAI:
             self.personalization_score = 0
             self.learning_data.clear()
             self.learning_data.update(defaults)
-            self._last_save_time = 0.0
+            self._last_save_time = None
             self._sample_count = 0
         # إعادة التعيين تُكتب فوراً: المستخدم طلب المسح ويتوقّع أثره الآن
         self.save_learning_data(force=True)
