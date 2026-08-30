@@ -11,8 +11,8 @@ from typing import Dict, List, Optional, Tuple
 from PyQt6.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
-                             QMainWindow, QPushButton, QTabWidget, QTextEdit,
-                             QVBoxLayout, QWidget)
+                             QMainWindow, QMessageBox, QPushButton, QTabWidget,
+                             QTextEdit, QVBoxLayout, QWidget)
 
 import diagnostics
 import icons
@@ -24,7 +24,10 @@ from battery_monitor import BatteryMonitor
 from battery_science import (END_OF_LIFE_SOH, OPTIMAL_WINDOW, SOURCES,
                              ceiling_saving_percent_per_year, stress_index)
 from battery_optimizer import BatteryOptimizer
-from default_settings import APP_NAME, APP_ORG, APP_VERSION
+from default_settings import (APP_NAME, APP_ORG, APP_VERSION,
+                              get_default_settings, guard_settings_from)
+from guard_service import GuardService
+from settings_bridge import qsettings_reader
 from i18n import is_rtl, t
 from monitor_thread import MonitorThread
 from notification_manager import SmartNotificationManager
@@ -62,11 +65,27 @@ class ModernUI(QMainWindow):
         super().__init__()
         self.settings = QSettings(APP_ORG, APP_NAME)
         self.permission_manager = PermissionManager()
-        self.monitor = BatteryMonitor()
-        self.ai = BatteryAI()
-        self.notification_manager = SmartNotificationManager()
+
+        # سياق مشترك من متحكّم الخلفية: النافذة تُبنى بعد أن يكون التطبيق
+        # يعمل ويتعلّم منذ مدة، فتتبنّى كائناته بدل إنشاء نسخ ثانية تقرأ نفس
+        # العتاد وتكتب نفس ملفات التعلّم.
+        shared = getattr(self, '_shared_context', None) or {}
+        self._adopted_thread = 'monitor_thread' in shared
+
+        self.monitor = shared.get('monitor') or BatteryMonitor()
+        self.ai = shared.get('ai') or BatteryAI()
+        self.notification_manager = (shared.get('notification_manager')
+                                     or SmartNotificationManager())
         self.optimizer = BatteryOptimizer(ai_engine=self.ai)
         self.auto_optimizer = AutoOptimizer(self.optimizer, self.ai)
+
+        # خطّ الحارس: نسب الطاقة للعمليات، الاستدلال، والإجراءات الفعلية.
+        # يُبنى قبل الواجهة لأن لوحة التحليل تقرأ حالته عند التهيئة.
+        self.guard_service = shared.get('guard_service') or GuardService(
+            self.monitor, self.ai, self._settings_snapshot(),
+            on_action=self._on_guard_action)
+        self._shared_tray = shared.get('tray')
+        self._last_intelligence = None
 
         # حالة التشخيص العميق
         self._diagnostics_report = None
@@ -216,7 +235,13 @@ class ModernUI(QMainWindow):
         self.uptime_timer.timeout.connect(self._update_uptime)
         self.uptime_timer.start(60000)
 
-        self.tray = BatteryTrayIcon(self)
+        # أيقونة واحدة فقط: عند الفتح من وضع الخلفية تكون الأيقونة موجودة
+        # منذ بدء الجلسة، وإنشاء ثانية يعني أيقونتين متطابقتين في الشريط.
+        if self._shared_tray is not None:
+            self.tray = self._shared_tray
+            self.tray.parent = self
+        else:
+            self.tray = BatteryTrayIcon(self)
 
     # ══════════════════════════════════════════════════════
     # نافذة الشحن: مصدر واحد للقيمة، وتحقّق صريح بعد التطبيق
@@ -504,17 +529,31 @@ class ModernUI(QMainWindow):
         self.raise_()
     
     def start_monitoring(self):
-        """بدء المراقبة الخلفية"""
-        self.monitor_thread = MonitorThread(
-            self.monitor,
-            self.ai,
-            self.get_current_settings()
-        )
-        
+        """
+        بدء المراقبة الخلفية، أو تبنّي خيط يعمل أصلاً.
+
+        عند الفتح من وضع الخلفية يكون الخيط يعمل منذ مدة: تشغيل خيط ثانٍ يعني
+        قراءتين للعتاد وكتابتين لملف التعلّم في نفس اللحظة، فنتبنّى القائم
+        ونكتفي بوصل إشاراته إلى الواجهة.
+        """
+        shared = getattr(self, '_shared_context', None) or {}
+        adopted = shared.get('monitor_thread')
+        if adopted is not None:
+            self.monitor_thread = adopted
+            self.monitor_thread.update_settings(self.get_current_settings())
+            logger.info("تبنّت اللوحة خيط المراقبة العامل في الخلفية")
+        else:
+            self.monitor_thread = MonitorThread(
+                self.monitor,
+                self.ai,
+                self.get_current_settings(),
+                guard_service=self.guard_service
+            )
+            self.monitor_thread.start()
+
         self.monitor_thread.battery_updated.connect(self.update_battery_display)
         self.monitor_thread.notification_requested.connect(self.send_notification)
-        
-        self.monitor_thread.start()
+        self.monitor_thread.intelligence_updated.connect(self.on_intelligence_report)
         
         self.ai_timer = QTimer()
         self.ai_timer.timeout.connect(self.refresh_ai_analysis)
@@ -1101,8 +1140,137 @@ class ModernUI(QMainWindow):
             'charge_threshold': battery_thresholds.get('optimal_min', 40),
             'unplug_threshold': battery_thresholds.get('optimal_max', 80)
         })
+
+        # سياسة الحارس: مصدر واحد يقرؤه المنسّق وخيط المراقبة معاً
+        settings.update(self._guard_settings())
         
         return settings
+
+    # ══════════════════════════════════════════════════════
+    # الحارس: الإعدادات والتقارير والإجراءات
+    # ══════════════════════════════════════════════════════
+
+    def _guard_settings(self) -> Dict:
+        """
+        سياسة الحارس من الإعدادات المحفوظة.
+
+        تُقرأ من QSettings لا من عناصر الواجهة، لأن المنسّق يُبنى قبل الواجهة
+        وقد يعمل بلا واجهة أصلاً في وضع الخلفية. المنطق نفسه في
+        `default_settings.guard_settings_from` يستخدمه متحكّم الخلفية، فلا
+        تختلف السياسة بين الوضعين بصمت.
+        """
+        return guard_settings_from(qsettings_reader(self.settings))
+
+    def _settings_snapshot(self) -> Dict:
+        """إعدادات المنسّق عند البناء، قبل وجود أي عنصر واجهة"""
+        return self._guard_settings()
+
+    def on_intelligence_report(self, report) -> None:
+        """
+        تقرير استدلال جديد. يُحدّث لوحة التحليل والصينية، ويُنبّه على المخالف
+        الأسوأ مرة واحدة لكل اسم حتى لا يتحوّل التنبيه إلى إزعاج متكرر.
+        """
+        self._last_intelligence = report
+        try:
+            self._render_offenders(report)
+        except Exception as e:
+            logger.error(f"تعذّر عرض تقرير الاستدلال: {e}")
+        try:
+            if hasattr(self, 'tray') and self.tray is not None:
+                self.tray.update_offenders(report)
+        except Exception as e:
+            logger.debug(f"تعذّر تحديث الصينية بالمخالفين: {e}")
+
+    def _render_offenders(self, report) -> None:
+        """كتابة أعلى المخالفين في لوحة التحليل إن وُجد مكانها"""
+        label = getattr(self, 'offenders_label', None)
+        if label is None:
+            return
+        actionable = report.offenders[:5]
+        if not actionable:
+            label.setText(t('guard.no_offenders'))
+            return
+        lines = []
+        for item in actionable:
+            watts = f"{item.watts:.1f}{t('unit.watt')}" if item.watts else '—'
+            lines.append(t('guard.offender_line', name=item.name, watts=watts,
+                           score=int(item.damage_score),
+                           loss=round(item.annual_capacity_loss, 2)))
+        label.setText('\n'.join(lines))
+
+    def _on_guard_action(self, outcome, offender) -> None:
+        """
+        بلاغ من الحارس. يُسجَّل دائماً، ويُشعَر به المستخدم حين يكون إجراءً
+        فعلياً أو تنبيهاً على مخالف يستحق قراره.
+        """
+        try:
+            self.log_event(t('guard.log_line', kind=t(f'guard.action.{outcome.kind}'),
+                             name=outcome.name,
+                             state=t('guard.applied') if outcome.applied
+                             else t('guard.skipped')))
+        except Exception as e:
+            logger.debug(f"تعذّر تسجيل إجراء الحارس: {e}")
+
+        if offender is None or not outcome.applied:
+            return
+        try:
+            self.send_notification(
+                t('guard.title'),
+                t('guard.notify.offender', name=offender.name,
+                  watts=round(offender.watts, 1),
+                  loss=round(offender.annual_capacity_loss, 2)),
+                'normal')
+        except Exception as e:
+            logger.debug(f"تعذّر إشعار الحارس: {e}")
+
+    def guard_suspend(self, name: str) -> None:
+        """تعليق مخالف بطلب المستخدم (قابل للتراجع)"""
+        self._run_guard_action(self.guard_service.suspend, name)
+
+    def guard_resume(self, name: str) -> None:
+        self._run_guard_action(self.guard_service.resume, name)
+
+    def guard_throttle(self, name: str) -> None:
+        self._run_guard_action(self.guard_service.throttle, name)
+
+    def guard_restore(self, name: str) -> None:
+        self._run_guard_action(self.guard_service.restore, name)
+
+    def guard_ignore(self, name: str) -> None:
+        """منع الحارس من لمس هذا الاسم، وحفظ القرار"""
+        self.guard_service.ignore(name)
+        self.settings.setValue('guard_blocklist',
+                               ','.join(self.guard_service.policy.blocklist))
+        self.log_event(t('guard.ignored', name=name))
+
+    def guard_terminate(self, name: str) -> None:
+        """
+        إيقاف نهائي بطلب صريح، بعد تأكيد. لا يُنفَّذ تلقائياً في أي حالة،
+        لأن خسارة عمل غير محفوظ أغلى من أي توفير في الطاقة.
+        """
+        answer = QMessageBox.warning(
+            self, t('guard.title'), t('guard.confirm_terminate', name=name),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._run_guard_action(self.guard_service.terminate, name)
+
+    def _run_guard_action(self, action, name: str) -> None:
+        """تنفيذ إجراء حارس مع إبلاغ صادق عن النتيجة"""
+        try:
+            outcome = action(name)
+        except Exception as e:
+            logger.error(f"فشل إجراء الحارس على {name}: {e}")
+            self.log_event(t('guard.failed', name=name, error=str(e)))
+            return
+        if outcome.applied:
+            self.log_event(t('guard.log_line',
+                             kind=t(f'guard.action.{outcome.kind}'), name=name,
+                             state=t('guard.applied')))
+        else:
+            self.log_event(t('guard.refused', name=name,
+                             reason=t(f'guard.reason.{outcome.reason}')))
     
     def on_autostart_changed(self, state):
         """معالجة تغيير حالة التشغيل التلقائي"""
@@ -1487,6 +1655,10 @@ class ModernUI(QMainWindow):
                 # تصفير داخل نفس الكائن حتى تبقى مراجع خيط المراقبة
                 # والمحسّنات صالحة (استبدال الكائن كان يُحيي البيانات القديمة)
                 self.ai.reset()
+                # تعلّم الحارس جزء من الذكاء نفسه: تركه يعني بقاء نموذج طاقة
+                # وسجل مخالفين مبنيين على بيانات أُعلن مسحها.
+                self.guard_service.reset()
+                self._last_intelligence = None
                 
                 # تحديث الواجهة
                 if hasattr(self, 'recommendations_text'):
@@ -1764,37 +1936,68 @@ class ModernUI(QMainWindow):
         except Exception as e:
             logger.error(f"خطأ في الحفظ التلقائي: {e}")
     
-    def quit_application(self):
-        """إنهاء البرنامج بشكل كامل ونظيف"""
+    def quit_application(self, interactive: bool = True):
+        """
+        إنهاء البرنامج بشكل كامل ونظيف.
+
+        `interactive=False` يتخطّى نافذة التقدّم: عند `SIGTERM` من systemd أو
+        تسجيل الخروج لا يوجد مستخدم يقرأها، ورسم نافذة أثناء إغلاق الجلسة قد
+        يتعلّق حتى تنتهي مهلة النظام فتُقتل العملية بـ SIGKILL قبل التنظيف.
+        """
         if getattr(self, '_quitting', False):
             return
         self._quitting = True
-        
-        from PyQt6.QtWidgets import QProgressDialog
-        from PyQt6.QtCore import Qt as QtCore
-        
-        progress = QProgressDialog("جارٍ إغلاق التطبيق...", None, 0, 5, self)
-        progress.setWindowTitle("BatteryGuardAI")
-        progress.setWindowModality(QtCore.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        progress.show()
-        QApplication.processEvents()
-        
+
+        progress = None
+        if interactive:
+            from PyQt6.QtCore import Qt as QtCore
+            from PyQt6.QtWidgets import QProgressDialog
+
+            progress = QProgressDialog("جارٍ إغلاق التطبيق...", None, 0, 5, self)
+            progress.setWindowTitle("BatteryGuardAI")
+            progress.setWindowModality(QtCore.WindowModality.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+            progress.show()
+            QApplication.processEvents()
+
+        def step(value: int, label: str = '') -> None:
+            if progress is None:
+                return
+            progress.setValue(value)
+            if label:
+                progress.setLabelText(label)
+            QApplication.processEvents()
+
         self.log_event("إيقاف البرنامج...")
-        
-        # 1) إيقاف المؤقتات
-        progress.setValue(1)
+        self._shutdown_sequence(step)
+
+        if progress is not None:
+            progress.close()
+        QApplication.quit()
+
+    def _shutdown_sequence(self, step=lambda value, label='': None):
+        """
+        خطوات الإغلاق النظيف بترتيبها الملزم.
+
+        الترتيب ليس اعتباطياً: الحارس أولاً لأن الإفراج عن عملية معلّقة يجب أن
+        يحدث قبل اختفاء من علّقها، ثم يتوقّف خيط المراقبة حتى لا يكتب أحد على
+        ملفات التعلّم بعد حفظها، ثم يُحفظ التعلّم أخيراً.
+        """
+        step(1)
         for timer_name in ('auto_save_timer', 'ai_timer', 'uptime_timer',
                            'auto_opt_stats_timer'):
             timer = getattr(self, timer_name, None)
             if timer is not None:
                 timer.stop()
-        
-        # 2) إيقاف التحسين التلقائي والتذكيرات
-        progress.setValue(2)
-        progress.setLabelText("إيقاف الخدمات الخلفية...")
-        QApplication.processEvents()
+
+        step(2, "إيقاف الخدمات الخلفية...")
+        # الحارس أولاً: أي عملية معلّقة يجب أن تُفرَج قبل أن يختفي من علّقها،
+        # وإلا بقيت متوقفة بلا سبب مفهوم للمستخدم.
+        try:
+            self.guard_service.shutdown()
+        except Exception as e:
+            logger.error(f"إيقاف الحارس: {e}")
         try:
             self.auto_optimizer.auto_optimize_enabled = False
             self.auto_optimizer.stop()
@@ -1804,30 +2007,23 @@ class ModernUI(QMainWindow):
             self.notification_manager.stop_all_reminders()
         except Exception as e:
             logger.debug(f"إيقاف التذكيرات: {e}")
-        
-        # 3) إيقاف خيط المراقبة بشكل تعاوني (بدون terminate غير الآمن)
-        progress.setValue(3)
-        progress.setLabelText("إيقاف المراقبة...")
-        QApplication.processEvents()
-        if hasattr(self, 'monitor_thread') and self.monitor_thread is not None:
+
+        step(3, "إيقاف المراقبة...")
+        if getattr(self, 'monitor_thread', None) is not None:
             self.monitor_thread.stop(timeout_ms=4000)
-        
-        # 4) حفظ البيانات
-        progress.setValue(4)
-        progress.setLabelText("حفظ البيانات...")
-        QApplication.processEvents()
+
+        step(4, "حفظ البيانات...")
         try:
-            self.ai.save_learning_data()
+            # `force`: الحفظ الدوري محدود بمهلة لتقليل الكتابة على القرص،
+            # وعند الخروج لا يجوز أن تمنع تلك المهلة حفظ ساعة من التعلّم.
+            self.ai.save_learning_data(force=True)
         except Exception as e:
-            logger.debug(f"حفظ نهائي: {e}")
-        
-        # 5) إخفاء الصينية والخروج
-        progress.setValue(5)
-        if hasattr(self, 'tray'):
+            logger.error(f"حفظ نهائي: {e}")
+
+        step(5)
+        if getattr(self, 'tray', None) is not None:
             self.tray.hide()
-        
-        progress.close()
-        QApplication.quit()
+        logger.info("اكتمل الإغلاق النظيف")
     
     def update_notification_settings(self):
         """تحديث إعدادات الإشعارات الذكية"""
