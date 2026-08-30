@@ -8,11 +8,15 @@
 - إيقاف تعاوني عبر threading.Event بدلاً من QThread.terminate() غير الآمن.
 - لا يكرر منطق تنبيهات العتبات: مدير الإشعارات هو المصدر الوحيد لقرار
   الإشعارات، وهذا الخيط يبث البيانات الخام فقط.
+- يشغّل خطّ الحارس (`guard_service`) على وتيرته الخاصة الأبطأ: جولة نسب
+  الطاقة تقرأ عدّادات مئات العمليات، وتشغيلها كل ثانيتين يجعل التطبيق نفسه
+  من أكبر مستنزفي البطارية.
 """
 
 import logging
+import threading
 import time
-from typing import Dict
+from typing import Dict, Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -31,14 +35,18 @@ class MonitorThread(QThread):
 
     battery_updated = pyqtSignal(dict)
     notification_requested = pyqtSignal(str, str, str)
+    #: تقرير استدلال جديد (IntelligenceReport) - يُبَث حين تكتمل جولة نسب
+    intelligence_updated = pyqtSignal(object)
 
-    def __init__(self, monitor, ai, settings: Dict):
+    def __init__(self, monitor, ai, settings: Dict, guard_service=None):
         super().__init__()
         self.monitor = monitor
         self.ai = ai
         self.settings = dict(settings)
-        self._stop_event = __import__('threading').Event()
-        self.interval_override: int = None  # فرض فاصل ثابت عند الحاجة
+        #: خطّ الاستدلال والحماية؛ `None` يعني تشغيلاً بلا حارس
+        self.guard_service = guard_service
+        self._stop_event = threading.Event()
+        self.interval_override: Optional[int] = None  # فرض فاصل ثابت عند الحاجة
 
     # ── التحكم بالدورة الحياتية ─────────────────────────────────
 
@@ -62,6 +70,11 @@ class MonitorThread(QThread):
     def update_settings(self, settings: Dict):
         """تحديث الإعدادات مباشرة من خيط الواجهة"""
         self.settings = dict(settings)
+        if self.guard_service is not None:
+            try:
+                self.guard_service.apply_settings(self.settings)
+            except Exception as e:
+                logger.error(f"تعذّر تحديث سياسة الحارس: {e}")
 
     # ── حلقة المراقبة ────────────────────────────────────────────
 
@@ -78,6 +91,9 @@ class MonitorThread(QThread):
                     health_info = self.monitor.get_battery_health()
                     if health_info.get('health_percentage') is not None:
                         self.ai.update_hardware_health(health_info['health_percentage'])
+
+                    # خطّ الحارس يقرّر بنفسه متى تحين جولته (وتيرة أبطأ)
+                    self._run_guard(battery_status, health_info)
 
                     # بطارية لا تُبلّغ: لا قرارات حدود مبنية على قياس غير صالح
                     if battery_status.get('reporting', True):
@@ -107,6 +123,20 @@ class MonitorThread(QThread):
                 logger.error(f"خطأ في خيط المراقبة ({error_streak} متتالية): {e}")
                 self._sleep(backoff)
         logger.info("انتهى خيط المراقبة")
+
+    def _run_guard(self, battery_status: Dict, health_info: Dict):
+        """
+        جولة الحارس. فشلها يُسجَّل ولا يُوقف المراقبة: قراءة البطارية والتنبيه
+        عند انخفاضها أهمّ من تحليل العمليات، فلا يجوز أن يُسقطها خطأ فيه.
+        """
+        if self.guard_service is None:
+            return
+        try:
+            report = self.guard_service.step(battery_status, health_info)
+            if report is not None:
+                self.intelligence_updated.emit(report)
+        except Exception as e:
+            logger.error(f"خطأ في جولة الحارس: {e}")
 
     def _compute_interval(self, status: Dict) -> float:
         """اختيار الفاصل: ثابت إن فُرض، وإلا تكيفي حسب الحالة"""

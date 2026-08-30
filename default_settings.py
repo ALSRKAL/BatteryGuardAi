@@ -93,6 +93,55 @@ DEFAULT_SETTINGS = {
     
     # التعلم من الاستخدام - مفعل افتراضياً
     "ai_learning_enabled": True,
+
+    # ═══════════════════════════════════════════════════════════
+    # نسب استهلاك الطاقة للعمليات (power_attribution)
+    # ═══════════════════════════════════════════════════════════
+
+    # قياس استهلاك كل عملية - مفعل افتراضياً (هو أساس معرفة من يُتلف البطارية)
+    "attribution_enabled": True,
+
+    # ثواني بين كل جولة قياس. أقل من 10 يجعل التطبيق نفسه حِملاً محسوساً،
+    # وأكثر من 60 يفقد القفزات القصيرة. القيمة تُقصّ إلى 10..300 في المنسّق.
+    "attribution_interval": 25,
+
+    # ═══════════════════════════════════════════════════════════
+    # حارس البطارية (guard_actions)
+    # ═══════════════════════════════════════════════════════════
+
+    # الحارس مفعل افتراضياً، لكنه يراقب ويُنبّه فقط
+    "guard_enabled": True,
+
+    # التنفيذ التلقائي - معطل افتراضياً: لا يتغيّر شيء في جهاز المستخدم
+    # بلا إذنه، حتى لو كان التغيير مفيداً وقابلاً للتراجع
+    "guard_automatic": False,
+
+    # أقصى شدّة مسموحة: alert | throttle | suspend
+    # (terminate غير مقبولة كسقف سياسة: لا إيقاف تلقائي أبداً)
+    "guard_max_action": "alert",
+
+    # لا تصرّف إلا على البطارية: أثناء الشحن الاستهلاك لا يُنقص عمر البطارية
+    # بنفس الطريقة، فالتدخّل فيه إزعاج بلا مقابل
+    "guard_only_on_battery": True,
+
+    # مستوى شحن يبدأ عنده التصرّف التلقائي (100 = في أي مستوى)
+    "guard_act_below_percent": 100,
+
+    # أقل درجة ضرر (0-100) تستدعي إجراءً
+    "guard_min_damage_score": 45,
+
+    # أقل ثقة (0-99) تستدعي إجراءً تلقائياً؛ ما دونها تنبيه فقط
+    "guard_min_confidence": 55,
+
+    # السماح بخفض أولوية المعالج (renice) وهو غير قابل للاستعادة على لينكس
+    # بلا صلاحيات - معطل افتراضياً
+    "guard_allow_irreversible_nice": False,
+
+    # أسماء عمليات يسمح المستخدم بالتصرّف تجاهها (فارغ = كلها مسموحة)
+    "guard_allowlist": "",
+
+    # أسماء عمليات يمنع المستخدم لمسها (تُضاف إلى القائمة المحمية)
+    "guard_blocklist": "",
     
     # ═══════════════════════════════════════════════════════════
     # إعدادات الواجهة
@@ -140,6 +189,47 @@ DEFAULT_SETTINGS = {
 def get_default_settings():
     """الحصول على الإعدادات الافتراضية"""
     return DEFAULT_SETTINGS.copy()
+
+
+#: مفاتيح الحارس ونسب الطاقة وأنواعها. قائمة واحدة يقرؤها كل من يحتاجها
+#: (لوحة القياس ومتحكّم الخلفية) حتى لا تتفرّق القراءة في موضعين فتختلف.
+GUARD_SETTING_KEYS = (
+    ('guard_enabled', bool),
+    ('guard_automatic', bool),
+    ('guard_max_action', str),
+    ('guard_only_on_battery', bool),
+    ('guard_act_below_percent', int),
+    ('guard_min_damage_score', int),
+    ('guard_min_confidence', int),
+    ('guard_allow_irreversible_nice', bool),
+    ('guard_allowlist', list),
+    ('guard_blocklist', list),
+    ('attribution_enabled', bool),
+    ('attribution_interval', int),
+)
+
+
+def guard_settings_from(reader):
+    """
+    سياسة الحارس من أي مخزن إعدادات.
+
+    `reader(key, default, kind)` يعيد القيمة المحوّلة. هذا التجريد يسمح لنفس
+    المنطق أن يقرأ من `QSettings` في الواجهة ومن نفس المخزن في وضع الخلفية
+    بلا نافذة، فالسياسة واحدة في الحالتين لا سياستان تختلفان بصمت.
+
+    القوائم تُخزَّن نصوصاً مفصولة بفواصل لأن `QSettings` لا يحفظ القوائم
+    الفارغة بشكل موثوق عبر المنصات.
+    """
+    result = {}
+    for key, kind in GUARD_SETTING_KEYS:
+        default = DEFAULT_SETTINGS.get(key)
+        if kind is list:
+            raw = reader(key, default if isinstance(default, str) else '', str)
+            result[key] = [part.strip() for part in str(raw or '').split(',')
+                           if part.strip()]
+        else:
+            result[key] = reader(key, default, kind)
+    return result
 
 
 def get_first_run_message():
