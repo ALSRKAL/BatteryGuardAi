@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# BatteryGuard Pro - PyInstaller Spec File
+# BatteryGuardAI - PyInstaller Spec File
 
 import sys
 import os
@@ -32,8 +32,15 @@ json_files = [
     ('auto_optimizer_settings.json', '.'),
 ]
 
+# ملفات الترجمة - بدونها تظهر الواجهة بمفاتيحها الخام
+locale_files = []
+locales_dir = Path('locales')
+if locales_dir.exists():
+    for locale_file in locales_dir.glob('*.json'):
+        locale_files.append((str(locale_file), 'locales'))
+
 # تجميع كل الملفات
-all_datas = sound_files + asset_files
+all_datas = sound_files + asset_files + locale_files
 for json_file, dest in json_files:
     if Path(json_file).exists():
         all_datas.append((json_file, dest))
@@ -47,6 +54,14 @@ a = Analysis(
         'PyQt6.QtCore',
         'PyQt6.QtGui',
         'PyQt6.QtWidgets',
+        # طبقات التصميم والعلم والقدرات
+        'theme',
+        'icons',
+        'panel_widgets',
+        'i18n',
+        'battery_science',
+        'hardware_capability',
+        'ui_components',
         'psutil',
         'json',
         'pathlib',
@@ -59,28 +74,62 @@ a = Analysis(
         'platform',
         'plyer',
         'plyer.platforms.win.notification',
+        # ═══════════════════════════════════════════════════
         # وحدات التطبيق
+        #
+        # القائمة كاملة عن قصد. PyInstaller يتتبّع الاستيراد الساكن، لكن
+        # `service_runner` يستورد `main_window` داخل دالة (ليبقى وضع الخلفية
+        # بلا تحميل الواجهة)، و`autostart_manager` يستورد `service_installer`
+        # داخل دوالّه. الاستيراد المؤجّل هو ما يفوت التتبّع الساكن، وأثره
+        # نسخة مبنيّة تعمل حتى أول نقرة إظهار ثم تفشل.
+        # ═══════════════════════════════════════════════════
+
+        # الأساس والتخزين والترجمة
         'storage',
-        'battery_ai',
+        'resource_path',
+        'default_settings',
+        'settings_bridge',
+        'i18n',
+
+        # القياس والعتاد
+        'battery_monitor',
+        'hardware_capability',
+        'battery_science',
+        'diagnostics',
         'monitor_thread',
         'charge_controller',
         'charge_control_advanced',
+
+        # الذكاء والحارس
+        'battery_ai',
+        'power_attribution',
+        'battery_intelligence',
+        'guard_actions',
+        'guard_service',
+
+        # التحسين
         'battery_optimizer',
         'battery_optimizer_ai',
         'auto_optimizer',
-        'permission_manager',
-        'interactive_notification_dialog',
-        'actionable_notification_dialog',
-        'welcome_dialog',
-        'default_settings',
-        'app_colors',
-        'resource_path',
-        'notification_manager',
-        'battery_monitor',
-        'tray_icon',
+
+        # التشغيل ودورة الحياة
+        'service_runner',
+        'service_installer',
+        'lifecycle',
         'single_instance',
         'autostart_manager',
+        'permission_manager',
+
+        # الواجهة
         'main_window',
+        'ui_components',
+        'panel_widgets',
+        'theme',
+        'icons',
+        'tray_icon',
+        'notification_manager',
+        'interactive_notification_dialog',
+        'welcome_dialog',
     ],
     hookspath=[],
     hooksconfig={},

@@ -1,47 +1,100 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""النافذة الرئيسية للتطبيق"""
+"""النافذة الرئيسية - لوحة قياس البطارية"""
 
-import sys
-import logging
-import statistics
-from typing import Dict, List
-from datetime import datetime
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QTabWidget, QSystemTrayIcon, QMenu, QApplication, QFrame)
-from PyQt6.QtCore import QSettings, QTimer
-from PyQt6.QtGui import QAction
 import json
+import logging
+from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-from battery_monitor import BatteryMonitor
-from battery_ai import BatteryAI
-from notification_manager import SmartNotificationManager
-from monitor_thread import MonitorThread
-from ui_components import StatusTab, SettingsTab, AITab, StatsTab
-from tray_icon import BatteryTrayIcon
-from battery_optimizer import BatteryOptimizer
-from permission_manager import PermissionManager
-from autostart_manager import autostart_manager
+from PyQt6.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
+                             QMainWindow, QMessageBox, QPushButton, QTabWidget,
+                             QTextEdit, QVBoxLayout, QWidget)
+
+import diagnostics
+import icons
+import theme
 from auto_optimizer import AutoOptimizer
+from autostart_manager import autostart_manager
+from battery_ai import BatteryAI
+from battery_monitor import BatteryMonitor
+from battery_science import (END_OF_LIFE_SOH, OPTIMAL_WINDOW, SOURCES,
+                             ceiling_saving_percent_per_year, stress_index)
+from battery_optimizer import BatteryOptimizer
+from default_settings import (APP_NAME, APP_ORG, APP_VERSION,
+                              get_default_settings, guard_settings_from)
+from guard_service import GuardService
+from settings_bridge import qsettings_reader
+from i18n import is_rtl, t
+from monitor_thread import MonitorThread
+from notification_manager import SmartNotificationManager
+from panel_widgets import ChargeWindowJaw, EngravedRail
+from permission_manager import PermissionManager
+from resource_path import get_data_path, get_resource_path
+from tray_icon import BatteryTrayIcon
+from ui_components import (AnalysisTab, ControlTab, DiagnosticsTab, RecordTab,
+                           SettingsTab, StatusTab)
 
 logger = logging.getLogger('BatteryGuard')
 
 
+class _DiagnosticsWorker(QThread):
+    """
+    يشغّل الفحص العميق بعيداً عن خيط الواجهة: الفحص يقرأ عشرات المسارات
+    ويستدعي أدوات خارجية، وتجميد الواجهة ثانيتين عيب لا عذر له.
+    """
+
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def run(self):
+        try:
+            self.finished.emit(diagnostics.run(deep=True))
+        except Exception as e:  # الفحص لا يجوز أن يُسقط التطبيق
+            logger.error(f"خطأ في خيط التشخيص: {e}", exc_info=True)
+            self.failed.emit(str(e))
+
+
 class ModernUI(QMainWindow):
-    """الواجهة الرسومية العصرية"""
+    """لوحة القياس: نافذة واحدة تحمل الحكم والقراءة والقدرات والتحكم"""
     
     def __init__(self):
         super().__init__()
-        self.settings = QSettings('BatteryGuard', 'Pro')
+        self.settings = QSettings(APP_ORG, APP_NAME)
         self.permission_manager = PermissionManager()
-        self.monitor = BatteryMonitor()
-        self.ai = BatteryAI()
-        self.notification_manager = SmartNotificationManager()
+
+        # سياق مشترك من متحكّم الخلفية: النافذة تُبنى بعد أن يكون التطبيق
+        # يعمل ويتعلّم منذ مدة، فتتبنّى كائناته بدل إنشاء نسخ ثانية تقرأ نفس
+        # العتاد وتكتب نفس ملفات التعلّم.
+        shared = getattr(self, '_shared_context', None) or {}
+        self._adopted_thread = 'monitor_thread' in shared
+
+        self.monitor = shared.get('monitor') or BatteryMonitor()
+        self.ai = shared.get('ai') or BatteryAI()
+        self.notification_manager = (shared.get('notification_manager')
+                                     or SmartNotificationManager())
         self.optimizer = BatteryOptimizer(ai_engine=self.ai)
         self.auto_optimizer = AutoOptimizer(self.optimizer, self.ai)
-        self.is_dark_mode = True
-        
+
+        # خطّ الحارس: نسب الطاقة للعمليات، الاستدلال، والإجراءات الفعلية.
+        # يُبنى قبل الواجهة لأن لوحة التحليل تقرأ حالته عند التهيئة.
+        self.guard_service = shared.get('guard_service') or GuardService(
+            self.monitor, self.ai, self._settings_snapshot(),
+            on_action=self._on_guard_action)
+        self._shared_tray = shared.get('tray')
+        self._last_intelligence = None
+
+        # حالة التشخيص العميق
+        self._diagnostics_report = None
+        self._diagnostics_worker = None
+        self._diagnostics_running = False
+        self._last_diagnostics_finding = None
+        self._last_notified_advice = None
+        self._trace_started = None
+
         # تمرير كلمة مرور sudo إذا كانت متوفرة من البداية
         self._sync_permissions()
         
@@ -54,346 +107,421 @@ class ModernUI(QMainWindow):
         self.load_settings()
         self._load_log_from_file()
         self.start_monitoring()
+
+        # فحص أول بعد استقرار الواجهة: يحدّد نمط الجهاز وقدراته الحقيقية
+        QTimer.singleShot(1500, self.run_diagnostics)
         
     def init_ui(self):
-        """تهيئة الواجهة الرسومية"""
-        self.setWindowTitle("BatteryGuard Pro")
-        self.setMinimumSize(900, 650)
-        self.resize(1100, 800)
-        
-        # تعيين أيقونة النافذة
-        from PyQt6.QtGui import QIcon
-        icon_path = Path('assets/logo.png')
+        """
+        تهيئة لوحة القياس.
+
+        عقد الاتجاه (عالم «لوحة القياس»، مفتاح الرمية beac5dd9):
+        THESIS: التطبيق جهاز قياس يقول الحقيقة عن هذه البطارية بالذات ويعترف
+          بما لا يستطيع فعله؛ يرفض حلقة النسبة والبطاقات الزجاجية التي تشحنها
+          كل تطبيقات البطارية.
+        OWN-WORLD: لوحة ألمنيوم مؤكسد مطفأة، حروف سلك-سكرين، حواف محفورة
+          بحدّين، حبر فوسفوري واحد لرسوم القياس، واللون محفوظ لحقل الحالة.
+        STORY: يرى المستخدم حكماً واحداً بلغة بسيطة، ثم الرقم والأثر، ثم ما
+          يدعمه عتاده فعلاً، ثم خطوة واحدة قابلة للتنفيذ.
+        FIRST VIEWPORT: شريط رأس محفور (هوية، حكم، طبقة القدرة)، تحته حقل
+          الحالة المشبع بالقراءة الأساسية وأثر الاستهلاك، ثم طبقة التوصيات
+          المعلَّمة، ثم شريط القدرات المعنون. الإجراء الأساسي في الطبقة نفسها.
+        FORM: لوحة أجهزة القياس المخبرية، المرتبة الرابعة في قائمة العوالم
+          المشتقّة، أسندتها الرمية بمفتاح beac5dd9.
+        FINISH: unreviewed and undocumented is unfinished; this build ends with
+          the finish review, the verdict, DESIGN.md, and every shipping raster
+          carrying its provenance.
+        """
+        self.setWindowTitle(t('app.name'))
+        self.setMinimumSize(960, 700)
+        self.resize(1180, 860)
+
+        if is_rtl():
+            self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+
+        icon_path = Path(get_resource_path('assets/logo.png'))
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
-        
-        self.setStyleSheet(self.get_modern_stylesheet())
-        
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(0)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # شريط العنوان المحسّن
-        header = QWidget()
-        header.setStyleSheet("""
-            QWidget {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #1e3a8a, stop:0.5 #2563eb, stop:1 #3b82f6);
-                border-radius: 0;
-            }
-        """)
-        header.setFixedHeight(90)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(35, 0, 35, 0)
-        
-        # أيقونة وعنوان
-        title_container = QHBoxLayout()
-        title_container.setSpacing(15)
-        
-        icon_label = QLabel("⚡")
-        icon_label.setStyleSheet("font-size: 42px; background: transparent; color: #fbbf24;")
-        title_container.addWidget(icon_label)
-        
-        text_container = QVBoxLayout()
-        text_container.setSpacing(2)
-        title = QLabel("BatteryGuard Pro")
-        title.setStyleSheet("font-size: 28px; font-weight: 800; color: #ffffff; background: transparent;")
-        subtitle = QLabel("نظام إدارة البطارية الذكي")
-        subtitle.setStyleSheet("font-size: 13px; color: rgba(255,255,255,0.8); background: transparent;")
-        title_container.addWidget(title)
-        title_container.addWidget(subtitle)
-        header_layout.addLayout(title_container)
-        header_layout.addStretch()
-        
 
-        
-        main_layout.addWidget(header)
-        
-        # حاوية التبويبات المحسّنة
-        tabs_container = QWidget()
-        tabs_container.setStyleSheet("""
-            QWidget {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #1a1a2e, stop:1 #0f0f1e);
-                color: #ffffff;
-            }
-        """)
-        tabs_layout = QVBoxLayout(tabs_container)
-        tabs_layout.setContentsMargins(25, 25, 25, 25)
-        
+        self.setStyleSheet(theme.stylesheet())
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setSpacing(0)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        # ── شريط الرأس المحفور ──
+        self.rail = EngravedRail()
+        self.rail.set_device(self.monitor.capability.vendor, self.monitor.capability.product)
+        self.rail.set_tier(self.monitor.capability.tier)
+        root.addWidget(self.rail)
+
+        # ── الجسم: عمود واحد محدود العرض حتى لا تتمدد اللوحة بلا نظام ──
+        body_host = QWidget()
+        host_layout = QHBoxLayout(body_host)
+        host_layout.setContentsMargins(theme.SPACE_4, theme.SPACE_3,
+                                       theme.SPACE_4, theme.SPACE_3)
+        host_layout.setSpacing(0)
+
+        # المحتوى يملأ العرض المتاح؛ الكثافة تُدار داخل كل مجال بشبكة متكيّفة
+        body = QWidget()
+        host_layout.addWidget(body, 1)
+
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(theme.SPACE_4)
+
+        # ── مُحدِّد المجال: كل شيء داخل مجاله، ولا تكديس فوق التابات ──
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: none;
-                background: transparent;
-                margin-top: 5px;
-            }
-            QTabBar::tab {
-                background: rgba(59, 130, 246, 0.08);
-                color: #94a3b8;
-                border: 2px solid transparent;
-                padding: 16px 32px;
-                margin-right: 6px;
-                border-radius: 14px;
-                font-size: 15px;
-                font-weight: 700;
-                min-width: 110px;
-            }
-            QTabBar::tab:selected {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #3b82f6, stop:1 #2563eb);
-                color: #ffffff;
-                border: 2px solid rgba(59, 130, 246, 0.5);
-            }
-            QTabBar::tab:hover:!selected {
-                background: rgba(59, 130, 246, 0.15);
-                color: #e2e8f0;
-                border: 2px solid rgba(59, 130, 246, 0.3);
-            }
-        """)
-        
-        self.status_tab = StatusTab.create(self)
-        self.tabs.addTab(self.status_tab, "📊 الحالة")
-        
+        self.tabs.setDocumentMode(True)
+
+        self.state_tab = StatusTab.create(self)
+        self.tabs.addTab(self.state_tab, t('tab.status'))
+
+        self.status_tab = ControlTab.create(self)
+        self.tabs.addTab(self.status_tab, t('tab.control'))
+
+        self.ai_tab = AnalysisTab.create(self)
+        self.tabs.addTab(self.ai_tab, t('tab.intelligence'))
+
+        self.diagnostics_tab = DiagnosticsTab.create(self)
+        self.tabs.addTab(self.diagnostics_tab, t('diag.title'))
+
+        self.stats_tab = RecordTab.create(self)
+        self.tabs.addTab(self.stats_tab, t('tab.record'))
+
         self.settings_tab = SettingsTab.create(self)
-        self.tabs.addTab(self.settings_tab, "⚙️ الإعدادات")
-        
-        self.ai_tab = AITab.create(self)
-        self.tabs.addTab(self.ai_tab, "🤖 الذكاء الاصطناعي")
-        
-        self.stats_tab = StatsTab.create(self)
-        self.tabs.addTab(self.stats_tab, "📈 الإحصائيات")
-        
-        tabs_layout.addWidget(self.tabs)
-        main_layout.addWidget(tabs_container)
-        
-        # شريط الحالة المحسّن
-        status_bar = QWidget()
-        status_bar.setStyleSheet("""
-            QWidget {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #0f172a, stop:1 #1e293b);
-                border-top: 2px solid #334155;
-            }
-        """)
-        status_bar.setFixedHeight(45)
-        status_layout = QHBoxLayout(status_bar)
-        status_layout.setContentsMargins(25, 0, 25, 0)
-        
-        # أيقونة الحالة
-        status_icon = QLabel("●")
-        status_icon.setStyleSheet("color: #10b981; font-size: 16px; background: transparent;")
-        status_layout.addWidget(status_icon)
-        
-        self.status_label = QLabel("جاهز للعمل")
-        self.status_label.setStyleSheet("""
-            color: #ffffff;
-            font-size: 13px;
-            background: transparent;
-            font-weight: 600;
-        """)
-        status_layout.addWidget(self.status_label)
-        
-        status_layout.addStretch()
-        
-        # معلومات إضافية
-        self.uptime_label = QLabel("وقت التشغيل: 0د")
-        self.uptime_label.setStyleSheet("color: #64748b; font-size: 11px; background: transparent;")
-        status_layout.addWidget(self.uptime_label)
-        
-        separator = QLabel("•")
-        separator.setStyleSheet("color: #475569; font-size: 11px; background: transparent; padding: 0 8px;")
-        status_layout.addWidget(separator)
-        
-        version_label = QLabel("v1.0.0")
-        version_label.setStyleSheet("color: #64748b; font-size: 11px; background: transparent; font-weight: 600;")
-        status_layout.addWidget(version_label)
-        
-        main_layout.addWidget(status_bar)
-        
-        # مؤقت لتحديث وقت التشغيل
+        self.tabs.addTab(self.settings_tab, t('tab.settings'))
+
+        body_layout.addWidget(self.tabs, 1)
+        root.addWidget(body_host, 1)
+
+        # ── شريط سفلي: حالة التشغيل ──
+        footer = QFrame()
+        footer.setProperty('role', 'rail')
+        footer.setFixedHeight(34)
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(theme.SPACE_5, 0, theme.SPACE_5, 0)
+        footer_layout.setSpacing(theme.SPACE_3)
+
+        self.status_label = QLabel(t('status.reading'))
+        self.status_label.setFont(theme.legend_font())
+        self.status_label.setStyleSheet(f"color: {theme.INK_DIM};")
+        footer_layout.addWidget(self.status_label)
+        footer_layout.addStretch(1)
+
+        self.uptime_label = QLabel('')
+        self.uptime_label.setFont(theme.font(theme.SIZE_LEGEND, 500, mono=True))
+        self.uptime_label.setStyleSheet(f"color: {theme.INK_FAINT};")
+        footer_layout.addWidget(self.uptime_label)
+
+        version_label = QLabel(APP_VERSION)
+        version_label.setFont(theme.font(theme.SIZE_LEGEND, 500, mono=True))
+        version_label.setStyleSheet(f"color: {theme.INK_FAINT};")
+        footer_layout.addWidget(version_label)
+        root.addWidget(footer)
+
+        # ── الربط النهائي ──
+        self.charge_window_jaw.windowChanged.connect(self._on_jaw_changed)
+        self.apply_window_button.clicked.connect(self.apply_charge_window)
+        self.min_charge_slider.valueChanged.connect(self._on_spin_changed)
+        self.max_charge_slider.valueChanged.connect(self._on_spin_changed)
+
+        self._refresh_capability_ui()
+
         self.start_time = datetime.now()
         self.uptime_timer = QTimer()
         self.uptime_timer.timeout.connect(self._update_uptime)
-        self.uptime_timer.start(60000)  # كل دقيقة
-        
-        self.tray = BatteryTrayIcon(self)
-    
-    def get_modern_stylesheet(self) -> str:
-        """الحصول على تنسيق عصري للواجهة"""
-        return """
-                QMainWindow { 
-                    background-color: #0f172a;
-                    color: #ffffff;
-                }
-                QWidget { 
-                    background-color: #1a1a2e;
-                    color: #ffffff;
-                }
-                QGroupBox {
-                    border: 2px solid rgba(59, 130, 246, 0.2);
-                    border-radius: 18px;
-                    margin-top: 22px;
-                    padding-top: 32px;
-                    padding-bottom: 22px;
-                    padding-left: 22px;
-                    padding-right: 22px;
-                    font-weight: 700;
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                        stop:0 rgba(30, 41, 59, 0.95), stop:1 rgba(15, 23, 42, 0.9));
-                    color: #ffffff;
-                }
-                QGroupBox::title {
-                    subcontrol-origin: margin;
-                    subcontrol-position: top left;
-                    left: 22px;
-                    top: 12px;
-                    padding: 0 12px;
-                    font-size: 17px;
-                    color: #ffffff;
-                    font-weight: 800;
-                    letter-spacing: 0.5px;
-                }
-                QLabel { 
-                    color: #ffffff;
-                }
-                QLabel[objectName^="value_"] {
-                    color: #ffffff;
-                    font-weight: 700;
-                }
-                QCheckBox {
-                    spacing: 10px;
-                    font-size: 14px;
-                    padding: 10px;
-                    color: #ffffff;
-                    background: transparent;
-                }
-                QCheckBox::indicator {
-                    width: 22px;
-                    height: 22px;
-                    border-radius: 6px;
-                    border: 2px solid #475569;
-                    background-color: #1e293b;
-                }
-                QCheckBox::indicator:checked {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                        stop:0 #3b82f6, stop:1 #2563eb);
-                    border-color: #3b82f6;
-                }
-                QCheckBox::indicator:hover {
-                    border-color: #3b82f6;
-                }
-                QSpinBox {
-                    padding: 10px 12px;
-                    border: 2px solid #334155;
-                    border-radius: 8px;
-                    background-color: #1e293b;
-                    color: #ffffff;
-                    font-size: 14px;
-                    min-width: 90px;
-                }
-                QSpinBox:focus {
-                    border-color: #3b82f6;
-                    background-color: #0f172a;
-                }
-                QSpinBox::up-button {
-                    subcontrol-origin: border;
-                    subcontrol-position: top right;
-                    background: #334155;
-                    border-radius: 4px;
-                    width: 20px;
-                    border-left: 1px solid #475569;
-                }
-                QSpinBox::down-button {
-                    subcontrol-origin: border;
-                    subcontrol-position: bottom right;
-                    background: #334155;
-                    border-radius: 4px;
-                    width: 20px;
-                    border-left: 1px solid #475569;
-                }
-                QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-                    background: #3b82f6;
-                }
-                QSpinBox::up-arrow {
-                    image: none;
-                    border: 2px solid #ffffff;
-                    width: 6px;
-                    height: 6px;
-                    border-bottom: none;
-                    border-right: none;
-                }
-                QSpinBox::down-arrow {
-                    image: none;
-                    border: 2px solid #ffffff;
-                    width: 6px;
-                    height: 6px;
-                    border-top: none;
-                    border-left: none;
-                }
-                QPushButton {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #3b82f6, stop:1 #2563eb);
-                    color: #ffffff;
-                    border: none;
-                    border-radius: 12px;
-                    padding: 14px 28px;
-                    font-size: 15px;
-                    font-weight: 700;
-                    letter-spacing: 0.5px;
-                }
-                QPushButton:hover {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #2563eb, stop:1 #1d4ed8);
-                    padding: 14px 30px;
-                }
-                QPushButton:pressed {
-                    background: #1e40af;
-                    padding: 14px 26px;
-                }
-                QSlider::groove:horizontal {
-                    border: none;
-                    height: 6px;
-                    background: #334155;
-                    border-radius: 3px;
-                }
-                QSlider::handle:horizontal {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                        stop:0 #3b82f6, stop:1 #2563eb);
-                    border: 2px solid #1e40af;
-                    width: 18px;
-                    height: 18px;
-                    margin: -7px 0;
-                    border-radius: 9px;
-                }
-                QSlider::handle:horizontal:hover {
-                    background: #60a5fa;
-                    border-color: #3b82f6;
-                }
-                QScrollBar:vertical {
-                    background: #1e293b;
-                    width: 10px;
-                    border-radius: 5px;
-                    margin: 0;
-                }
-                QScrollBar::handle:vertical {
-                    background: #475569;
-                    border-radius: 5px;
-                    min-height: 30px;
-                }
-                QScrollBar::handle:vertical:hover {
-                    background: #64748b;
-                }
-                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                    height: 0px;
-                }
-                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                    background: none;
-                }
+        self.uptime_timer.start(60000)
+
+        # أيقونة واحدة فقط: عند الفتح من وضع الخلفية تكون الأيقونة موجودة
+        # منذ بدء الجلسة، وإنشاء ثانية يعني أيقونتين متطابقتين في الشريط.
+        if self._shared_tray is not None:
+            self.tray = self._shared_tray
+            self.tray.parent = self
+        else:
+            self.tray = BatteryTrayIcon(self)
+
+    # ══════════════════════════════════════════════════════
+    # نافذة الشحن: مصدر واحد للقيمة، وتحقّق صريح بعد التطبيق
+    # ══════════════════════════════════════════════════════
+
+    def current_window(self) -> Tuple[int, int]:
+        """النافذة المعروضة الآن (الأدنى، الأقصى)"""
+        if hasattr(self, 'charge_window_jaw'):
+            return self.charge_window_jaw.window()
+        return (self.settings.value('min_charge_limit', 40, type=int),
+                self.settings.value('max_charge_limit', 80, type=int))
+
+    def _on_jaw_changed(self, floor: int, ceiling: int) -> None:
+        """تحريك الفكّ يحدّث الحقول الرقمية والتوقّع بلا حلقة إشارات"""
+        for widget, value in ((self.min_charge_slider, floor),
+                              (self.max_charge_slider, ceiling)):
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
+        self._update_window_labels(floor, ceiling)
+
+    def _on_spin_changed(self, _value: int) -> None:
+        """الحقول الرقمية هي التوأم المتاح للفكّ نفسه"""
+        floor = self.min_charge_slider.value()
+        ceiling = self.max_charge_slider.value()
+        if ceiling - floor < ChargeWindowJaw.MIN_GAP:
+            ceiling = floor + ChargeWindowJaw.MIN_GAP
+            self.max_charge_slider.blockSignals(True)
+            self.max_charge_slider.setValue(ceiling)
+            self.max_charge_slider.blockSignals(False)
+        self.charge_window_jaw.set_window(floor, ceiling)
+        self._update_window_labels(floor, ceiling)
+
+    def _update_window_labels(self, floor: int, ceiling: int) -> None:
+        """التوفير المتوقّع يُحسب لحظياً من نفس المحرك المرجعي"""
+        percent = t('unit.percent')
+        self.min_charge_value_label.setText(f"{floor} {percent}")
+        self.max_charge_value_label.setText(f"{ceiling} {percent}")
+
+        projection = self.ai.wear_projection(ceiling)
+        saving = ceiling_saving_percent_per_year(
+            100, ceiling, projection['hours_plugged_per_day'] or 12.0)
+        self.window_projection_label.setText(t('window.projected_saving', saving=saving))
+
+    def apply_charge_window(self) -> None:
+        """تطبيق النافذة على العتاد، ثم قول الحقيقة عن النتيجة"""
+        floor, ceiling = self.current_window()
+
+        if not self.monitor.capability.can_control:
+            self._set_control_status(t('control.fail_reason.no_path'), theme.STATE_DEAD)
+            self.show_remediation()
+            return
+
+        try:
+            if not self.auto_charge_control.isChecked():
+                self.monitor.disable_charge_control()
+                self._set_control_status(t('control.inactive'), theme.INK_DIM)
+                return
+
+            verified = self.monitor.enable_charge_control(floor, ceiling)
+        except Exception as e:  # عتاد أو صلاحيات: لا يجوز أن ينهار التطبيق
+            logger.error(f"فشل تطبيق حدود الشحن: {e}")
+            self._set_control_status(t('control.failed'), theme.STATE_CRITICAL)
+            return
+
+        if verified:
+            self._set_control_status(
+                f"{t('window.applied', floor=floor, ceiling=ceiling)} · {t('window.verified')}",
+                theme.STATE_OK)
+            self.log_event(t('notify.control_applied'))
+        else:
+            error = self.monitor.last_control_error or {'reason': 'unreadable'}
+            reason = error.get('reason', 'unreadable')
+            self._set_control_status(
+                t(f'control.fail_reason.{reason}', **{k: v for k, v in error.items()
+                                                      if k != 'reason'}),
+                theme.STATE_CRITICAL)
+            self.log_event(t('notify.control_failed'))
+            self.show_remediation()
+
+        self.settings.setValue('min_charge_limit', floor)
+        self.settings.setValue('max_charge_limit', ceiling)
+
+    def _set_control_status(self, text: str, color: str) -> None:
+        if hasattr(self, 'control_status_label'):
+            self.control_status_label.setText(text)
+            self.control_status_label.setStyleSheet(f"color: {color};")
+
+    # ══════════════════════════════════════════════════════
+    # القدرات والمعالجة
+    # ══════════════════════════════════════════════════════
+
+    def _refresh_capability_ui(self) -> None:
+        """مزامنة كل ما يعتمد على قدرات العتاد بعد أي فحص"""
+        report = self.monitor.capability.as_dict()
+        self.capability_strip.set_report(report)
+        self.charge_window_jaw.set_supported(bool(report.get('can_control')))
+        self.rail.set_tier(str(report.get('tier', 'notify_only')))
+        self._render_remediation(self.monitor.capability.remediation)
+
+        # وصف الطبقة يظهر في شريط القدرات؛ سطر التحكم يقول النتيجة فقط
+        if not report.get('can_control'):
+            self._set_control_status(t('window.unsupported'), theme.STATE_DEAD)
+
+    def _render_remediation(self, steps: List) -> None:
+        """خطوات المعالجة: نص، وأمر قابل للنسخ، ومصدر"""
+        if not hasattr(self, 'remediation_body'):
+            return
+
+        while self.remediation_body.count():
+            item = self.remediation_body.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        self.remediation_plate.setVisible(bool(steps))
+        for index, step in enumerate(steps, 1):
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(theme.SPACE_2)
+
+            mark = QLabel()
+            mark.setPixmap(icons.pixmap('chevron', 14, theme.PHOSPHOR))
+            mark.setFixedWidth(16)
+            mark.setAlignment(Qt.AlignmentFlag.AlignTop)
+            row_layout.addWidget(mark)
+
+            text = QLabel(t(step.key, **step.params))
+            text.setWordWrap(True)
+            text.setFont(theme.font(theme.SIZE_BODY, 500))
+            text.setMaximumWidth(theme.MAX_TEXT_WIDTH)
+            row_layout.addWidget(text, 1)
+
+            if step.command:
+                copy_button = QPushButton(t('action.copy'))
+                copy_button.setProperty('role', 'quiet')
+                copy_button.setIcon(icons.icon('copy', 14, theme.INK_DIM))
+                command = step.command
+                copy_button.clicked.connect(
+                    lambda _checked=False, cmd=command, btn=copy_button:
+                    self._copy_command(cmd, btn))
+                row_layout.addWidget(copy_button, 0, Qt.AlignmentFlag.AlignTop)
+
+            self.remediation_body.addWidget(row)
+
+    def _copy_command(self, command: str, button) -> None:
+        """نسخ أمر المعالجة إلى الحافظة بلا تنفيذ تلقائي"""
+        from PyQt6.QtWidgets import QApplication
+        QApplication.clipboard().setText(command)
+        button.setText(t('action.copied'))
+        QTimer.singleShot(2000, lambda: button.setText(t('action.copy')))
+
+    def show_remediation(self) -> None:
+        """إظهار مجال التحكم عند خطوات المعالجة"""
+        self.tabs.setCurrentWidget(self.status_tab)
+        if hasattr(self, 'remediation_plate'):
+            self.remediation_plate.setVisible(bool(self.monitor.capability.remediation))
+
+    def show_diagnostics(self) -> None:
+        """الانتقال إلى مجال التشخيص، وتشغيل فحص إن لم يوجد تقرير بعد"""
+        self.tabs.setCurrentWidget(self.diagnostics_tab)
+        if self._diagnostics_report is None:
+            self.run_diagnostics()
+
+    def run_diagnostics(self) -> None:
         """
-    
+        فحص عميق في خيط منفصل: يقرأ العتاد ويشغّل أدوات خارجية، ولا يجوز
+        أن يجمّد الواجهة أثناء ذلك.
+        """
+        if self._diagnostics_running:
+            return
+        self._diagnostics_running = True
+        self.diagnostics_panel.set_busy(True)
+        self.status_label.setText(t('diag.running'))
+
+        worker = _DiagnosticsWorker(self)
+        worker.finished.connect(self._on_diagnostics_ready)
+        worker.failed.connect(self._on_diagnostics_failed)
+        self._diagnostics_worker = worker
+        worker.start()
+
+    def _on_diagnostics_ready(self, report) -> None:
+        """عرض التقرير: حكم عام، نتائج بأدلتها، وجدول خام"""
+        self._diagnostics_report = report
+        self._diagnostics_running = False
+        self.diagnostics_panel.set_busy(False)
+
+        grade_colors = {
+            'ok': theme.STATE_OK,
+            'degraded': theme.STATE_WARN,
+            'impaired': theme.STATE_WARN,
+            'unmeasurable': theme.STATE_CRITICAL,
+            'unknown': theme.STATE_DEAD,
+        }
+        environment = report.environment
+        device = ' '.join(part for part in (environment.get('vendor'),
+                                            environment.get('product')) if part)
+        bios = f"BIOS {environment.get('bios_version', '')} " \
+               f"{environment.get('bios_date', '')}".strip()
+        meta = ' · '.join(part for part in (
+            f"{t('diag.device_mode')}: {t('diag.mode.' + report.device_mode)}",
+            device, bios, f"{t('diag.generated')}: {report.generated_at}") if part)
+
+        findings = [{
+            'severity': finding.severity,
+            'title': t(finding.key, **finding.params),
+            'evidence': finding.evidence,
+            'remediation': [t(key) for key in finding.remediation],
+            'confidence': finding.confidence,
+        } for finding in report.findings]
+
+        self.diagnostics_panel.set_report(
+            t('diag.grade.' + report.grade),
+            grade_colors.get(report.grade, theme.STATE_DEAD),
+            meta, findings, diagnostics.readable_table(report))
+
+        top = report.top_finding
+        if top is not None:
+            self.log_event(f"{t('diag.title')}: {t(top.key, **top.params)}")
+            if top.severity in ('critical', 'warning') and \
+                    self._last_diagnostics_finding != top.id:
+                self._last_diagnostics_finding = top.id
+                self.notification_manager.send_notification(
+                    title=t('diag.title'),
+                    message=t(top.key, **top.params),
+                    urgency='critical' if top.severity == 'critical' else 'high',
+                    notification_type='health_warning', play_sound=True)
+        self.status_label.setText(t('diag.grade.' + report.grade))
+
+    def _on_diagnostics_failed(self, message: str) -> None:
+        """فشل الفحص لا يُسكت: يُسجَّل ويُعلن في شريط الحالة"""
+        self._diagnostics_running = False
+        self.diagnostics_panel.set_busy(False)
+        logger.error(f"فشل التشخيص: {message}")
+        self.status_label.setText(t('diag.unreadable'))
+
+    def export_diagnostics(self) -> None:
+        """حفظ التقرير الكامل: التصنيف والأدلة الخام معاً"""
+        if self._diagnostics_report is None:
+            self.run_diagnostics()
+            return
+        try:
+            path = Path(get_data_path('diagnostics_report.json'))
+            payload = {
+                'report': self._diagnostics_report.as_dict(),
+                'monitor': self.monitor.diagnostics(),
+                'raw_table': self.diagnostics_panel.raw_text().splitlines(),
+            }
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                            encoding='utf-8')
+            self.status_label.setText(t('diag.exported', path=str(path)))
+            self.log_event(t('diag.exported', path=str(path)))
+        except (OSError, TypeError, ValueError) as e:
+            logger.error(f"تعذّر تصدير التشخيص: {e}")
+            self.status_label.setText(t('diag.unreadable'))
+
+    def handle_advice_action(self, action: str) -> None:
+        """تنفيذ الإجراء المرافق للتوصية، أو إظهار المكان الذي يُنفّذ فيه"""
+        if action == 'enable_control':
+            self.auto_charge_control.setChecked(True)
+            self.tabs.setCurrentWidget(self.status_tab)
+            self.apply_charge_window()
+        elif action == 'lower_ceiling':
+            floor, _ceiling = self.current_window()
+            self.charge_window_jaw.set_window(floor, OPTIMAL_WINDOW[1], emit=True)
+            self.tabs.setCurrentWidget(self.status_tab)
+        elif action == 'optimize':
+            self.run_optimization()
+        elif action == 'open_diagnostics':
+            self.show_diagnostics()
+        elif action == 'open_capability':
+            self.show_remediation()
+        elif action == 'open_health':
+            self.tabs.setCurrentWidget(self.stats_tab)
+        else:
+            # إجراءات يدوية (وصل/فصل/تبريد): نكتفي بتسجيل النصيحة
+            self.status_label.setText(t(f'action.{action}'))
+            self.log_event(t(f'action.{action}'))
+
     def show_window(self):
         """عرض النافذة وتفعيلها"""
         self.show()
@@ -401,17 +529,31 @@ class ModernUI(QMainWindow):
         self.raise_()
     
     def start_monitoring(self):
-        """بدء المراقبة الخلفية"""
-        self.monitor_thread = MonitorThread(
-            self.monitor,
-            self.ai,
-            self.get_current_settings()
-        )
-        
+        """
+        بدء المراقبة الخلفية، أو تبنّي خيط يعمل أصلاً.
+
+        عند الفتح من وضع الخلفية يكون الخيط يعمل منذ مدة: تشغيل خيط ثانٍ يعني
+        قراءتين للعتاد وكتابتين لملف التعلّم في نفس اللحظة، فنتبنّى القائم
+        ونكتفي بوصل إشاراته إلى الواجهة.
+        """
+        shared = getattr(self, '_shared_context', None) or {}
+        adopted = shared.get('monitor_thread')
+        if adopted is not None:
+            self.monitor_thread = adopted
+            self.monitor_thread.update_settings(self.get_current_settings())
+            logger.info("تبنّت اللوحة خيط المراقبة العامل في الخلفية")
+        else:
+            self.monitor_thread = MonitorThread(
+                self.monitor,
+                self.ai,
+                self.get_current_settings(),
+                guard_service=self.guard_service
+            )
+            self.monitor_thread.start()
+
         self.monitor_thread.battery_updated.connect(self.update_battery_display)
         self.monitor_thread.notification_requested.connect(self.send_notification)
-        
-        self.monitor_thread.start()
+        self.monitor_thread.intelligence_updated.connect(self.on_intelligence_report)
         
         self.ai_timer = QTimer()
         self.ai_timer.timeout.connect(self.refresh_ai_analysis)
@@ -440,199 +582,129 @@ class ModernUI(QMainWindow):
             self.update_battery_display(battery_status)
     
     def update_battery_display(self, battery_status: Dict):
-        """تحديث عرض حالة البطارية مع التنبيهات الذكية"""
+        """تحديث لوحة القياس من قراءة واحدة للعتاد"""
         percent = battery_status['percent']
         is_charging = battery_status['is_charging']
-        
-        # فحص وإرسال التنبيهات الذكية
+        reporting = battery_status.get('reporting', True)
+        floor, ceiling = self.current_window()
+
         self.check_battery_alerts(battery_status)
-        
-        # تحديث ويدجت البطارية المتحرك
-        self.battery_widget.set_battery_level(percent, is_charging)
-        
-        # تحديث البطارية في الهيدر
-        if hasattr(self, 'header_battery_label'):
-            self.header_battery_percent = percent
-            self.header_battery_charging = is_charging
-            
-            # تحديث النص
-            status_text = "⚡" if is_charging else ""
-            self.header_battery_label.setText(f"{percent}% {status_text}")
-            
-            # تغيير اللون حسب المستوى
-            if percent >= 80:
-                color = "#10b981"
-            elif percent >= 40:
-                color = "#3b82f6"
-            elif percent >= 20:
-                color = "#f59e0b"
-            else:
-                color = "#ef4444"
-            
-            self.header_battery_label.setStyleSheet(f"""
-                font-size: 18px;
-                font-weight: 800;
-                color: {color};
-                background: transparent;
-            """)
-            
-            # إعادة رسم البطارية
-            if hasattr(self, 'header_battery_widget'):
-                self.header_battery_widget.update()
-        
-        # تحديث أيقونة الصينية مع الصحة (قراءة واحدة مع تخزين مؤقت داخلي)
-        health_info = self.monitor.get_battery_health()
-        health_percent = health_info['health_percentage']
-        self.tray.update_icon(percent, is_charging, health_percent)
-        
-        if is_charging:
-            self.charging_status.setText("⚡ متصل بالشاحن - جارٍ الشحن")
-            self.charging_status.setStyleSheet("""
-                font-size: 16px;
-                color: #10b981;
-                margin-top: 15px;
-                background: transparent;
-                font-weight: 600;
-            """)
+
+        health = self.monitor.get_battery_health()
+        soh = health.get('health_percentage')
+        self.tray.update_icon(percent, is_charging,
+                              int(soh) if soh is not None else None, reporting)
+
+        # ── حقل الحالة والأثر ──
+        if hasattr(self, 'state_plate'):
+            self.state_plate.set_reading(
+                percent, is_charging, reporting,
+                battery_status.get('status_key', 'status.reading'), floor, ceiling)
+
+            # المفاتيح الخام هي معرّفات الخانات، لا النصوص المترجمة
+            temp = battery_status.get('temperature')
+            draw = battery_status.get('power_draw', 0) or 0
+            cycles_value = health.get('cycle_count')
+            stress = stress_index(percent, temp, is_charging, percent >= ceiling) \
+                if reporting else None
+            self.state_plate.set_measures([
+                ('bolt', 'status.draw',
+                 f"{draw:.1f} {t('unit.watt')}" if draw > 0.1 else '—'),
+                ('thermometer', 'status.temperature',
+                 f"{temp:.1f} {t('unit.celsius')}" if temp is not None
+                 else t('status.assumed_temp', temp=25)),
+                ('pulse', 'health.title',
+                 f"{soh:.0f} {t('unit.percent')}" if soh is not None else t('health.unknown')),
+                ('cycle', 'health.cycles', str(cycles_value) if cycles_value else '—'),
+                ('plug', 'field.status', t(battery_status.get('status_key', 'status.reading'))),
+                ('gauge', 'status.stress',
+                 f"{stress['index']:.0f} · {t('stress.' + stress['band'])}"
+                 if stress else '—'),
+            ])
+            self._trace_sample(percent)
+
+        # ── القياسات في مجال التحكم ──
+        time_text = self._format_time_left(battery_status, percent, is_charging)
+        self._set_measure('time_remaining_label', time_text)
+        self.tray.update_time_remaining(time_text)
+
+        self._set_measure(
+            'power_draw_label',
+            f"{battery_status.get('power_draw', 0):.1f} {t('unit.watt')}"
+            if (battery_status.get('power_draw') or 0) > 0.1 else '—')
+
+        self._set_measure('health_label',
+                          f"{soh:.0f} {t('unit.percent')}" if soh is not None
+                          else t('health.unknown'))
+
+        cycles = health.get('cycle_count')
+        cycles_text = f"{cycles} {t('unit.cycles')}" if cycles else t('health.cycles_unavailable')
+        self._set_measure('cycle_count_label', cycles_text)
+        self._set_measure('cycle_count_stats_label', str(cycles) if cycles else '—')
+
+        temperature = battery_status.get('temperature')
+        self._set_measure('temperature_label',
+                          f"{temperature:.1f} {t('unit.celsius')}" if temperature is not None
+                          else t('status.temperature_unavailable'))
+
+        self._set_measure('charging_status', t(battery_status.get('status_key', 'status.reading')))
+
+        # ── الصحة في مجال السجل ──
+        if hasattr(self, 'health_progress'):
+            self.health_progress.setValue(int(soh) if soh is not None else 0)
+        if soh is None:
+            self._set_measure_text('health_status_label', t('health.unknown'), theme.INK_FAINT)
+        elif soh >= 90:
+            self._set_measure_text('health_status_label', t('advice.health_strong', soh=soh),
+                                   theme.STATE_OK)
+        elif soh > END_OF_LIFE_SOH:
+            self._set_measure_text('health_status_label',
+                                   t('health.soh') + f": {soh:.0f}%", theme.STATE_WARN)
         else:
-            self.charging_status.setText("🔋 يعمل على البطارية")
-            self.charging_status.setStyleSheet("""
-                font-size: 16px;
-                color: #ffffff;
-                margin-top: 15px;
-                background: transparent;
-                font-weight: 600;
-            """)
-        
-        # تحديث الوقت المتبقي
-        time_left = battery_status.get('time_left')
-        prediction = None
-        
-        if time_left and time_left > 0:
-            hours = time_left // 3600
-            minutes = (time_left % 3600) // 60
-            time_text = f"{hours}س {minutes}د"
-            self.time_remaining_label.setText(time_text)
-            self.time_remaining_label.setStyleSheet("""
-                QLabel {
-                    font-size: 18px;
-                    color: #10b981;
-                    background: transparent;
-                    font-weight: 700;
-                }
-            """)
-            # تحديث الأيقونة
-            self.tray.update_time_remaining(time_text)
-        else:
-            prediction = self.ai.predict_time_remaining(percent, is_charging)
-            if prediction:
-                self.time_remaining_label.setText(prediction)
-                # تحديث الأيقونة
-                self.tray.update_time_remaining(prediction)
-                self.time_remaining_label.setStyleSheet("""
-                    QLabel {
-                        font-size: 18px;
-                        color: #3b82f6;
-                        background: transparent;
-                        font-weight: 700;
-                    }
-                """)
-            else:
-                self.time_remaining_label.setText("جارٍ الحساب..." if is_charging else "غير محدد")
-                self.time_remaining_label.setStyleSheet("""
-                    QLabel {
-                        font-size: 18px;
-                        color: #ffffff;
-                        background: transparent;
-                        font-weight: 700;
-                    }
-                """)
-        
-        # تحديث معلومات الصحة (إعادة استخدام نفس القراءة المخزنة مؤقتاً)
-        self.health_label.setText(f"{health_percent}%")
-        
-        # لون حسب الصحة
-        if health_percent >= 80:
-            health_color = "#10b981"
-        elif health_percent >= 60:
-            health_color = "#3b82f6"
-        elif health_percent >= 40:
-            health_color = "#f59e0b"
-        else:
-            health_color = "#ef4444"
-        
-        self.health_label.setStyleSheet(f"""
-            QLabel {{
-                font-size: 18px;
-                color: {health_color};
-                background: transparent;
-                font-weight: 700;
-            }}
-        """)
-        
-        cycle_count = health_info['cycle_count']
-        self.cycle_count_label.setText(f"{cycle_count} دورة")
-        self.cycle_count_label.setStyleSheet("""
-            QLabel {
-                font-size: 18px;
-                color: #ffffff;
-                background: transparent;
-                font-weight: 700;
-            }
-        """)
-        
-        # تحديث استهلاك الطاقة
-        power_draw = battery_status.get('power_draw', 0)
-        
-        if power_draw > 0.1:
-            self.power_draw_label.setText(f"{power_draw:.1f}W")
-            power_color = "#f59e0b"
-        elif is_charging:
-            self.power_draw_label.setText("جارٍ الشحن")
-            power_color = "#10b981"
-        else:
-            self.power_draw_label.setText("منخفض")
-            power_color = "#ffffff"
-        
-        self.power_draw_label.setStyleSheet(f"""
-            QLabel {{
-                font-size: 18px;
-                color: {power_color};
-                background: transparent;
-                font-weight: 700;
-            }}
-        """)
-        
-        # تحديث تبويب الإحصائيات
-        self.health_progress.setValue(health_info['health_percentage'])
-        # تحديث معلومات الصحة في تبويب الإحصائيات
-        self.design_capacity_label.setText(f"{health_info['design_capacity']:.0f} mWh")
-        self.current_capacity_label.setText(f"{health_info['full_capacity']:.0f} mWh")
-        wear_level = 100 - health_info['health_percentage']
-        self.wear_level_label.setText(f"{wear_level}%")
-        
-        # تحديث حالة الصحة
-        if hasattr(self, 'health_status_label'):
-            if health_info['health_percentage'] >= 90:
-                self.health_status_label.setText("حالة ممتازة 🌟")
-                self.health_status_label.setStyleSheet("font-size: 13px; color: #10b981; font-weight: 700; background: transparent;")
-            elif health_info['health_percentage'] >= 80:
-                self.health_status_label.setText("حالة جيدة جداً ✅")
-                self.health_status_label.setStyleSheet("font-size: 13px; color: #3b82f6; font-weight: 700; background: transparent;")
-            elif health_info['health_percentage'] >= 70:
-                self.health_status_label.setText("حالة جيدة ⚡")
-                self.health_status_label.setStyleSheet("font-size: 13px; color: #f59e0b; font-weight: 700; background: transparent;")
-            else:
-                self.health_status_label.setText("يحتاج صيانة ⚠️")
-                self.health_status_label.setStyleSheet("font-size: 13px; color: #ef4444; font-weight: 700; background: transparent;")
-        
-        # تحديث دورات الشحن
-        if hasattr(self, 'cycle_count_stats_label'):
-            self.cycle_count_stats_label.setText(f"{health_info['cycle_count']}")
-        
-        # حساب وتحديث الإحصائيات المتقدمة
+            self._set_measure_text('health_status_label',
+                                   t('health.eol_reached'), theme.STATE_CRITICAL)
+
+        design = health.get('design_capacity') or 0
+        full = health.get('full_capacity') or 0
+        unit = t('unit.mah') if health.get('capacity_unit') == 'mah' else t('unit.wh')
+        divisor = 1.0 if health.get('capacity_unit') == 'mah' else 1000.0
+        self._set_measure('design_capacity_label',
+                          f"{design / divisor:.1f} {unit}" if design else '—')
+        self._set_measure('current_capacity_label',
+                          f"{full / divisor:.1f} {unit}" if full else '—')
+        self._set_measure('wear_level_label',
+                          f"{100 - soh:.1f} {t('unit.percent')}" if soh is not None else '—')
+
+        # شريط الصحة يختفي حين لا تُعرف الصحة: صفر بلا معنى يضلّل
+        if hasattr(self, 'health_progress'):
+            self.health_progress.setVisible(soh is not None)
+
         self._update_advanced_stats()
-    
+
+    def _trace_sample(self, percent: float) -> None:
+        """تغذية أثر الفوسفور مع مدى زمني حقيقي مقروء من الفواصل"""
+        now = datetime.now()
+        first = getattr(self, '_trace_started', None) or now
+        self._trace_started = first
+        span_minutes = (now - first).total_seconds() / 60.0
+        self.state_plate.push_sample(percent, span_minutes)
+
+    def _format_time_left(self, battery_status: Dict, percent: int,
+                          is_charging: bool) -> str:
+        """الزمن المتبقي من العتاد إن أعطاه، وإلا من تنبؤ المحرك، وإلا صراحةً"""
+        seconds = battery_status.get('time_left')
+        if seconds and seconds > 0:
+            hours, minutes = seconds // 3600, (seconds % 3600) // 60
+            return f"{hours}{t('unit.hour_short')} {minutes}{t('unit.minute_short')}"
+        if not battery_status.get('reporting', True):
+            return t('status.not_reporting')
+        prediction = self.ai.predict_time_remaining(percent, is_charging)
+        return prediction or t('status.time_unknown')
+
+    def _set_measure_text(self, attr: str, text: str, color: Optional[str] = None) -> None:
+        """كتابة نص وصفي في تسمية إن وُجدت"""
+        self._set_measure(attr, text, color)
+
     def send_notification(self, title: str, message: str, urgency: str):
         """إرسال إشعار ذكي"""
         if self.enable_notifications.isChecked():
@@ -652,148 +724,198 @@ class ModernUI(QMainWindow):
             self.log_event(f"{title}: {message}")
     
     def refresh_ai_analysis(self):
-        """تحديث تحليل الذكاء الاصطناعي المتقدم"""
+        """تحديث طبقة التوصيات وتقديرات التآكل من القياس الفعلي"""
         battery_status = self.monitor.get_battery_status()
         if not battery_status['available']:
             return
-        
-        # الحصول على التوصيات الذكية
-        recommendations = self.ai.get_smart_recommendations(
-            battery_status['percent'],
-            battery_status['is_charging']
+
+        health = self.monitor.get_battery_health()
+        floor, ceiling = self.current_window()
+
+        advice = self.ai.get_advice(
+            battery_status, health, floor, ceiling,
+            control_available=self.monitor.capability.can_control,
+            control_active=self.monitor.control_verified,
         )
-        
-        # إرسال توصية ذكية إذا كانت مهمة (دائماً حتى مع إخفاء التبويب)
-        if recommendations and hasattr(self, 'notification_manager'):
-            first_rec = recommendations[0]
-            if '🚨' in first_rec or '⚠️' in first_rec:
-                self.notification_manager.send_ai_recommendation(first_rec, priority=8)
-        
-        # تحديث عناصر واجهة تبويب AI فقط عند ظهوره (توفير رسم ومعالجة نصوص)
-        ai_tab_visible = self.tabs.currentWidget() is self.ai_tab
-        if not ai_tab_visible:
+        self._render_advice(advice)
+        self._notify_top_advice(advice)
+
+        projection = self.ai.wear_projection(
+            ceiling, battery_status.get('temperature'), health.get('health_percentage'))
+        stress = stress_index(
+            battery_status['percent'], battery_status.get('temperature'),
+            battery_status['is_charging'],
+            battery_status['percent'] >= ceiling,
+        )
+        self._render_wear(projection, stress, battery_status)
+        self._render_learning(projection)
+        self._render_summary(battery_status, health)
+
+    def _render_summary(self, battery_status: Dict, health: Dict) -> None:
+        """ملخص الجهاز: حقائق مقروءة من العتاد والتشخيص، لا فراغ"""
+        capability = self.monitor.capability
+        report = self._diagnostics_report
+        floor, ceiling = self.current_window()
+
+        self._set_measure('summary_device_label',
+                          ' '.join(part for part in (capability.vendor,
+                                                     capability.product) if part) or '—')
+        self._set_measure('summary_mode_label',
+                          t('diag.mode.' + report.device_mode) if report else '—')
+        self._set_measure('summary_tier_label', t('tier.' + capability.tier),
+                          theme.TIER_COLORS.get(capability.tier, theme.INK_DIM))
+
+        mains_online = (report.mains.get('online') if report else None)
+        self._set_measure('summary_mains_label',
+                          t('status.on_mains') if mains_online
+                          else t('status.discharging') if mains_online is False else '—')
+
+        zones = diagnostics.plausible_zones(report.thermal) if report else []
+        hottest = max(zones, key=lambda zone: zone['celsius']) if zones else None
+        self._set_measure('summary_thermal_label',
+                          f"{hottest['celsius']:.0f} {t('unit.celsius')} · {hottest['type']}"
+                          if hottest else '—')
+
+        self._set_measure('summary_control_label',
+                          t('control.active') if self.monitor.control_verified
+                          else t('control.inactive'))
+        self._set_measure('summary_window_label',
+                          f"{floor}–{ceiling} {t('unit.percent')}")
+        self._set_measure('summary_samples_label',
+                          str(len(self.ai.usage_history)))
+
+    def _render_advice(self, advice: List) -> None:
+        """عرض التوصيات في الطبقة العليا وفي مجال التحليل"""
+        rows = []
+        for item in advice:
+            evidence = ''
+            if item.evidence == 'measured':
+                evidence = t('evidence.measured')
+            elif item.evidence in SOURCES:
+                source = SOURCES[item.evidence]
+                evidence = (f"{t('evidence.source', label=source['label'])} "
+                            f"<a href=\"{source['url']}\" "
+                            f"style=\"color:{theme.INK_FAINT};\">{t('evidence.why')}</a>")
+            rows.append({
+                'severity': item.severity,
+                'text': t(item.key, **item.params),
+                'evidence': evidence,
+                'action': item.action or '',
+            })
+
+        # بطارية غير قابلة للقياس: نتائج التشخيص هي المحتوى المفيد الوحيد
+        # في هذه الحالة، فتُضاف بدل ترك المجال بسطر واحد.
+        report = self._diagnostics_report
+        if report is not None and report.grade in ('unmeasurable', 'impaired'):
+            for finding in report.findings[:3]:
+                if finding.severity in ('critical', 'warning', 'advice'):
+                    rows.append({
+                        'severity': finding.severity,
+                        'text': t(finding.key, **finding.params),
+                        'evidence': t('diag.confidence', value=finding.confidence),
+                        'action': 'open_diagnostics',
+                    })
+
+        # الطبقة العليا تحمل أهم صفّين فقط، والمجال يحمل القائمة كاملة
+        compact = getattr(self, 'advice_layer', None)
+        if compact is not None:
+            compact.set_rows(rows[:2])
+        full = getattr(self, 'advice_layer_full', None)
+        if full is not None:
+            full.set_rows(rows)
+
+    def _notify_top_advice(self, advice: List) -> None:
+        """
+        إشعار واحد عند تغيّر أهم نصيحة فقط. التكرار كل دورة تحديث إزعاج
+        لا معلومة، وكان السلوك السابق يرسل عند كل تحديث.
+        """
+        if not advice:
             return
-        
-        if recommendations:
-            text = "🎯 التوصيات الذكية:\n\n"
-            for i, rec in enumerate(recommendations, 1):
-                text += f"{i}. {rec}\n\n"
-            self.recommendations_text.setPlainText(text)
+        top = advice[0]
+        if top.severity not in ('critical', 'warning'):
+            return
+        if getattr(self, '_last_notified_advice', None) == top.id:
+            return
+        self._last_notified_advice = top.id
+        self.notification_manager.send_ai_recommendation(
+            t(top.key, **top.params), priority=9 if top.severity == 'critical' else 7)
+
+    def _render_wear(self, projection: Dict, stress: Dict, battery_status: Dict) -> None:
+        """أرقام التآكل والإجهاد كما حسبها المحرك المرجعي"""
+        per_year = t('unit.per_year')
+        self._set_measure('calendar_loss_label', f"{projection['calendar']:.1f} {per_year}")
+        self._set_measure('cyclic_loss_label', f"{projection['cyclic']:.1f} {per_year}")
+        self._set_measure('equivalent_cycles_label',
+                          f"{projection['equivalent_cycles']:.2f} {t('unit.cycles')}")
+        self._set_measure('high_soc_hours_label',
+                          f"{projection['hours_high_soc_per_day']:.1f} {t('unit.hour_short')}")
+
+        band = stress['band']
+        self._set_measure('stress_label',
+                          f"{stress['index']:.0f} · {t('stress.' + band)}",
+                          theme.stress_color(band))
+
+        days = projection.get('days_to_eol')
+        if days is None:
+            eol_text = t('health.eol_unknown')
+        elif days == 0:
+            eol_text = t('health.eol_reached')
         else:
-            self.recommendations_text.setPlainText("جارٍ تحليل أنماط الاستخدام...\nسيتم عرض التوصيات بعد جمع بيانات كافية.")
-        
-        # التنبؤ بالوقت المتبقي
-        prediction = self.ai.predict_time_remaining(
-            battery_status['percent'],
-            battery_status['is_charging']
-        )
-        
-        # الحصول على الإحصائيات المتقدمة
+            eol_text = t('health.eol_days', days=days)
+        self._set_measure('eol_label', eol_text)
+
+        headline = theme.field_for_state(
+            battery_status['percent'], battery_status['is_charging'],
+            battery_status.get('reporting', True), *self.current_window())[2]
+        if hasattr(self, 'rail'):
+            self.rail.set_verdict(t(headline), band)
+
+    def _render_learning(self, projection: Dict) -> None:
+        """حجم ما تعلّمه المحرك من هذا الجهاز وثقته"""
         stats = self.ai.get_usage_statistics()
-        
-        # تحديث بطاقات الإحصائيات
-        self.data_points_label.setText(f"{stats.get('total_records', 0)}")
-        self.patterns_found_label.setText(f"{stats.get('patterns_found', 0)}")
-        
-        efficiency = stats.get('efficiency_score', 100)
-        self.efficiency_score_label.setText(f"{efficiency}%")
-        
-        # الإحصائيات الجديدة
-        if hasattr(self, 'health_score_label'):
-            health = stats.get('health_score', 100)
-            self.health_score_label.setText(f"{health}%")
-        
-        if hasattr(self, 'drain_rate_label'):
-            drain_rate = stats.get('average_drain_rate', 0)
-            self.drain_rate_label.setText(f"{drain_rate:.2f}")
-        
-        if hasattr(self, 'charge_rate_label'):
-            charge_rate = stats.get('average_charge_rate', 0)
-            self.charge_rate_label.setText(f"{charge_rate:.2f}")
-        
-        # إحصائيات التعلم المتقدمة
-        if hasattr(self, 'learning_iterations_label'):
-            iterations = self.ai.learning_data.get('learning_iterations', 0)
-            self.learning_iterations_label.setText(f"{iterations}")
-        
-        if hasattr(self, 'prediction_accuracy_label'):
-            if self.ai.prediction_accuracy:
-                avg_accuracy = statistics.mean(self.ai.prediction_accuracy[-20:])
-                self.prediction_accuracy_label.setText(f"{int(avg_accuracy)}%")
-            else:
-                self.prediction_accuracy_label.setText("جارٍ التعلم...")
-        
-        if hasattr(self, 'confidence_label'):
-            confidence = self.ai._calculate_confidence()
-            self.confidence_label.setText(f"{confidence}%")
-        
-        # الإحصائيات المتقدمة الجديدة
-        if hasattr(self, 'learning_progress_label'):
-            progress = stats.get('learning_progress', 0)
-            self.learning_progress_label.setText(f"{progress}%")
-        
-        if hasattr(self, 'ai_maturity_label'):
-            maturity = stats.get('ai_maturity_level', 'مبتدئ')
-            self.ai_maturity_label.setText(maturity)
-        
-        if hasattr(self, 'personalization_label'):
-            personalization = stats.get('personalization_score', 0)
-            self.personalization_label.setText(f"{personalization}%")
-        
-        # تحديث نص التنبؤات المفصل
+        self._set_measure('data_points_label', f"{stats.get('total_records', 0)}")
+        self._set_measure('patterns_found_label', f"{projection['observed_days']:.2f}")
+        self._set_measure('drain_rate_label',
+                          f"{stats.get('average_drain_rate', 0):.2f} {t('unit.per_minute')}")
+        self._set_measure('charge_rate_label',
+                          f"{stats.get('average_charge_rate', 0):.2f} {t('unit.per_minute')}")
+        self._set_measure('confidence_label', f"{self.ai._calculate_confidence()}%")
+
+        soh = projection.get('soh_percent')
+        self._set_measure('health_score_label',
+                          f"{soh:.0f}%" if soh is not None else t('health.unknown'))
+
         if hasattr(self, 'prediction_text'):
-            prediction_text = ""
-            
-            if prediction:
-                prediction_text += f"⏱️ الوقت المتبقي: {prediction}\n\n"
-            
-            drain_rate = stats.get('average_drain_rate', 0)
-            charge_rate = stats.get('average_charge_rate', 0)
-            peak_drain = stats.get('peak_drain_rate', 0)
-            
-            if drain_rate > 0:
-                prediction_text += f"📉 معدل الاستنزاف: {drain_rate:.2f}%/د"
-                if peak_drain > 0:
-                    prediction_text += f" (الذروة: {peak_drain:.2f}%/د)"
-                prediction_text += "\n"
-            
-            if charge_rate > 0:
-                prediction_text += f"📈 معدل الشحن: {charge_rate:.2f}%/د\n"
-            
-            heavy_hours = stats.get('heavy_usage_hours', [])
-            if heavy_hours:
-                prediction_text += f"\n🕐 ساعات الاستخدام المكثف:\n   {', '.join(f'{h}:00' for h in heavy_hours)}\n"
-            
-            optimal_times = stats.get('optimal_charge_times', [])
-            if optimal_times:
-                prediction_text += f"\n⚡ أوقات الشحن المثالية:\n   {', '.join(f'{h}:00' for h in optimal_times)}\n"
-            
-            cycles = stats.get('charge_cycle_count', 0)
-            if cycles > 0:
-                prediction_text += f"\n🔄 دورات الشحن: {cycles}"
-                avg_duration = stats.get('avg_charge_duration', 0)
-                if avg_duration > 0:
-                    prediction_text += f" (~{int(avg_duration)} دقيقة/دورة)"
-            
-            power_draw = stats.get('average_power_draw', 0)
-            if power_draw > 0:
-                prediction_text += f"\n⚡ متوسط استهلاك الطاقة: {power_draw:.1f}W"
-                peak_power = stats.get('peak_power_draw', 0)
-                if peak_power > 0:
-                    prediction_text += f" (الذروة: {peak_power:.1f}W)"
-            
-            if prediction_text:
-                self.prediction_text.setText(prediction_text)
-            else:
-                self.prediction_text.setText("جارٍ جمع البيانات للتنبؤ الدقيق...")
-    
+            status = self.monitor.get_battery_status()
+            # التنبؤ بلا قياس صالح تخمين: لا يُعرض على بطارية لا تُبلّغ
+            prediction = self.ai.predict_time_remaining(
+                int(status['percent']), status['is_charging']) \
+                if status.get('reporting', True) else None
+            lines = [prediction] if prediction else []
+            heavy = stats.get('heavy_usage_hours') or []
+            if heavy:
+                lines.append(t('record.high_soc_hours') + ': ' +
+                             ', '.join(f"{hour}:00" for hour in heavy))
+            if projection['observed_days'] < 1:
+                lines.append(t('record.learning'))
+            self.prediction_text.setText('\n'.join(line for line in lines if line))
+
+    def _set_measure(self, attr: str, text: str, color: Optional[str] = None) -> None:
+        """كتابة قيمة قياس في تسمية إن وُجدت (التخطيط لا يقيّد التحديث)"""
+        label = getattr(self, attr, None)
+        if label is None:
+            return
+        label.setText(text)
+        if color:
+            label.setStyleSheet(f"color: {color};")
+
     def _sync_permissions(self):
         """مزامنة الصلاحيات مع جميع المكونات"""
         if self.permission_manager.sudo_password:
             if self.monitor.charge_controller:
                 self.monitor.charge_controller.sudo_password = self.permission_manager.sudo_password
             self.optimizer.set_sudo_password(self.permission_manager.sudo_password)
-            logger.info("✅ تم مزامنة الصلاحيات مع جميع المكونات")
+            logger.info("تم مزامنة الصلاحيات مع جميع المكونات")
     
     def save_all_settings(self):
         """حفظ جميع الإعدادات (موحد)"""
@@ -911,18 +1033,18 @@ class ModernUI(QMainWindow):
                 success = self.monitor.enable_charge_control(min_charge, max_charge)
                 
                 if success:
-                    self.log_event(f"✅ تم تفعيل التحكم التلقائي: {min_charge}%-{max_charge}%")
-                    self.status_label.setText("✅ تم حفظ الإعدادات وتفعيل التحكم")
+                    self.log_event(f"تم تفعيل التحكم التلقائي: {min_charge}%-{max_charge}%")
+                    self.status_label.setText("تم حفظ الإعدادات وتفعيل التحكم")
                 else:
-                    self.log_event("⚠️ تم حفظ الإعدادات - سيتم استخدام الإشعارات فقط")
-                    self.status_label.setText("⚠️ تم الحفظ - إشعارات فقط")
+                    self.log_event("تم حفظ الإعدادات - سيتم استخدام الإشعارات فقط")
+                    self.status_label.setText("تم الحفظ - إشعارات فقط")
             else:
                 # إيقاف التحكم
                 self.monitor.disable_charge_control()
                 self.log_event("تم إيقاف التحكم التلقائي")
-                self.status_label.setText("✅ تم حفظ الإعدادات")
+                self.status_label.setText("تم حفظ الإعدادات")
         else:
-            self.status_label.setText("✅ تم حفظ الإعدادات")
+            self.status_label.setText("تم حفظ الإعدادات")
         
         # تحديث خيط المراقبة
         if hasattr(self, 'monitor_thread'):
@@ -1018,8 +1140,137 @@ class ModernUI(QMainWindow):
             'charge_threshold': battery_thresholds.get('optimal_min', 40),
             'unplug_threshold': battery_thresholds.get('optimal_max', 80)
         })
+
+        # سياسة الحارس: مصدر واحد يقرؤه المنسّق وخيط المراقبة معاً
+        settings.update(self._guard_settings())
         
         return settings
+
+    # ══════════════════════════════════════════════════════
+    # الحارس: الإعدادات والتقارير والإجراءات
+    # ══════════════════════════════════════════════════════
+
+    def _guard_settings(self) -> Dict:
+        """
+        سياسة الحارس من الإعدادات المحفوظة.
+
+        تُقرأ من QSettings لا من عناصر الواجهة، لأن المنسّق يُبنى قبل الواجهة
+        وقد يعمل بلا واجهة أصلاً في وضع الخلفية. المنطق نفسه في
+        `default_settings.guard_settings_from` يستخدمه متحكّم الخلفية، فلا
+        تختلف السياسة بين الوضعين بصمت.
+        """
+        return guard_settings_from(qsettings_reader(self.settings))
+
+    def _settings_snapshot(self) -> Dict:
+        """إعدادات المنسّق عند البناء، قبل وجود أي عنصر واجهة"""
+        return self._guard_settings()
+
+    def on_intelligence_report(self, report) -> None:
+        """
+        تقرير استدلال جديد. يُحدّث لوحة التحليل والصينية، ويُنبّه على المخالف
+        الأسوأ مرة واحدة لكل اسم حتى لا يتحوّل التنبيه إلى إزعاج متكرر.
+        """
+        self._last_intelligence = report
+        try:
+            self._render_offenders(report)
+        except Exception as e:
+            logger.error(f"تعذّر عرض تقرير الاستدلال: {e}")
+        try:
+            if hasattr(self, 'tray') and self.tray is not None:
+                self.tray.update_offenders(report)
+        except Exception as e:
+            logger.debug(f"تعذّر تحديث الصينية بالمخالفين: {e}")
+
+    def _render_offenders(self, report) -> None:
+        """كتابة أعلى المخالفين في لوحة التحليل إن وُجد مكانها"""
+        label = getattr(self, 'offenders_label', None)
+        if label is None:
+            return
+        actionable = report.offenders[:5]
+        if not actionable:
+            label.setText(t('guard.no_offenders'))
+            return
+        lines = []
+        for item in actionable:
+            watts = f"{item.watts:.1f}{t('unit.watt')}" if item.watts else '—'
+            lines.append(t('guard.offender_line', name=item.name, watts=watts,
+                           score=int(item.damage_score),
+                           loss=round(item.annual_capacity_loss, 2)))
+        label.setText('\n'.join(lines))
+
+    def _on_guard_action(self, outcome, offender) -> None:
+        """
+        بلاغ من الحارس. يُسجَّل دائماً، ويُشعَر به المستخدم حين يكون إجراءً
+        فعلياً أو تنبيهاً على مخالف يستحق قراره.
+        """
+        try:
+            self.log_event(t('guard.log_line', kind=t(f'guard.action.{outcome.kind}'),
+                             name=outcome.name,
+                             state=t('guard.applied') if outcome.applied
+                             else t('guard.skipped')))
+        except Exception as e:
+            logger.debug(f"تعذّر تسجيل إجراء الحارس: {e}")
+
+        if offender is None or not outcome.applied:
+            return
+        try:
+            self.send_notification(
+                t('guard.title'),
+                t('guard.notify.offender', name=offender.name,
+                  watts=round(offender.watts, 1),
+                  loss=round(offender.annual_capacity_loss, 2)),
+                'normal')
+        except Exception as e:
+            logger.debug(f"تعذّر إشعار الحارس: {e}")
+
+    def guard_suspend(self, name: str) -> None:
+        """تعليق مخالف بطلب المستخدم (قابل للتراجع)"""
+        self._run_guard_action(self.guard_service.suspend, name)
+
+    def guard_resume(self, name: str) -> None:
+        self._run_guard_action(self.guard_service.resume, name)
+
+    def guard_throttle(self, name: str) -> None:
+        self._run_guard_action(self.guard_service.throttle, name)
+
+    def guard_restore(self, name: str) -> None:
+        self._run_guard_action(self.guard_service.restore, name)
+
+    def guard_ignore(self, name: str) -> None:
+        """منع الحارس من لمس هذا الاسم، وحفظ القرار"""
+        self.guard_service.ignore(name)
+        self.settings.setValue('guard_blocklist',
+                               ','.join(self.guard_service.policy.blocklist))
+        self.log_event(t('guard.ignored', name=name))
+
+    def guard_terminate(self, name: str) -> None:
+        """
+        إيقاف نهائي بطلب صريح، بعد تأكيد. لا يُنفَّذ تلقائياً في أي حالة،
+        لأن خسارة عمل غير محفوظ أغلى من أي توفير في الطاقة.
+        """
+        answer = QMessageBox.warning(
+            self, t('guard.title'), t('guard.confirm_terminate', name=name),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._run_guard_action(self.guard_service.terminate, name)
+
+    def _run_guard_action(self, action, name: str) -> None:
+        """تنفيذ إجراء حارس مع إبلاغ صادق عن النتيجة"""
+        try:
+            outcome = action(name)
+        except Exception as e:
+            logger.error(f"فشل إجراء الحارس على {name}: {e}")
+            self.log_event(t('guard.failed', name=name, error=str(e)))
+            return
+        if outcome.applied:
+            self.log_event(t('guard.log_line',
+                             kind=t(f'guard.action.{outcome.kind}'), name=name,
+                             state=t('guard.applied')))
+        else:
+            self.log_event(t('guard.refused', name=name,
+                             reason=t(f'guard.reason.{outcome.reason}')))
     
     def on_autostart_changed(self, state):
         """معالجة تغيير حالة التشغيل التلقائي"""
@@ -1027,10 +1278,10 @@ class ModernUI(QMainWindow):
             if state == 2:  # Qt.CheckState.Checked
                 success, message = autostart_manager.enable()
                 if success:
-                    self.log_event(f"✅ {message}")
-                    logger.info("✅ تم تفعيل التشغيل التلقائي")
+                    self.log_event(f"{message}")
+                    logger.info("تم تفعيل التشغيل التلقائي")
                 else:
-                    self.log_event(f"❌ فشل التفعيل: {message}")
+                    self.log_event(f"فشل التفعيل: {message}")
                     logger.error(f"فشل تفعيل التشغيل التلقائي: {message}")
                     # إلغاء التحديد إذا فشل
                     self.start_on_boot.blockSignals(True)
@@ -1039,13 +1290,13 @@ class ModernUI(QMainWindow):
             else:
                 success, message = autostart_manager.disable()
                 if success:
-                    self.log_event(f"✅ {message}")
-                    logger.info("✅ تم إلغاء التشغيل التلقائي")
+                    self.log_event(f"{message}")
+                    logger.info("تم إلغاء التشغيل التلقائي")
                 else:
-                    self.log_event(f"❌ فشل الإلغاء: {message}")
+                    self.log_event(f"فشل الإلغاء: {message}")
                     logger.error(f"فشل إلغاء التشغيل التلقائي: {message}")
         except Exception as e:
-            self.log_event(f"❌ خطأ في التشغيل التلقائي: {e}")
+            self.log_event(f"خطأ في التشغيل التلقائي: {e}")
             logger.error(f"خطأ في معالجة التشغيل التلقائي: {e}")
     
     def on_auto_optimization_changed(self, state):
@@ -1083,8 +1334,8 @@ class ModernUI(QMainWindow):
                 # بدء التحسين التلقائي
                 self.auto_optimizer.start()
                 
-                self.log_event(f"✅ تم تفعيل التحسين التلقائي - الوضع: {mode}")
-                logger.info(f"✅ تم تفعيل التحسين التلقائي - الوضع: {mode}, الفترة: {interval}ث")
+                self.log_event(f"تم تفعيل التحسين التلقائي - الوضع: {mode}")
+                logger.info(f"تم تفعيل التحسين التلقائي - الوضع: {mode}, الفترة: {interval}ث")
                 
                 # بدء مؤقت لتحديث إحصائيات التحسين
                 if not hasattr(self, 'auto_opt_stats_timer'):
@@ -1100,11 +1351,11 @@ class ModernUI(QMainWindow):
                 if hasattr(self, 'auto_opt_stats_timer'):
                     self.auto_opt_stats_timer.stop()
                 
-                self.log_event("✅ تم إيقاف التحسين التلقائي")
-                logger.info("✅ تم إيقاف التحسين التلقائي")
+                self.log_event("تم إيقاف التحسين التلقائي")
+                logger.info("تم إيقاف التحسين التلقائي")
                 
         except Exception as e:
-            self.log_event(f"❌ خطأ في التحسين التلقائي: {e}")
+            self.log_event(f"خطأ في التحسين التلقائي: {e}")
             logger.error(f"خطأ في معالجة التحسين التلقائي: {e}")
     
     def update_auto_optimization_stats(self):
@@ -1119,9 +1370,9 @@ class ModernUI(QMainWindow):
                 health = stats.get('system_health_score', 100)
                 
                 if priority >= 7:
-                    self.log_event(f"⚠️ النظام يحتاج تحسين عاجل - الأولوية: {priority}/10, الصحة: {health}%")
+                    self.log_event(f"النظام يحتاج تحسين عاجل - الأولوية: {priority}/10, الصحة: {health}%")
                 elif priority >= 4:
-                    self.log_event(f"📊 النظام يحتاج تحسين - الأولوية: {priority}/10, الصحة: {health}%")
+                    self.log_event(f"النظام يحتاج تحسين - الأولوية: {priority}/10, الصحة: {health}%")
             
             # تحديث الإحصائيات في الواجهة إذا كانت موجودة
             if hasattr(self, 'auto_opt_count_label'):
@@ -1404,6 +1655,10 @@ class ModernUI(QMainWindow):
                 # تصفير داخل نفس الكائن حتى تبقى مراجع خيط المراقبة
                 # والمحسّنات صالحة (استبدال الكائن كان يُحيي البيانات القديمة)
                 self.ai.reset()
+                # تعلّم الحارس جزء من الذكاء نفسه: تركه يعني بقاء نموذج طاقة
+                # وسجل مخالفين مبنيين على بيانات أُعلن مسحها.
+                self.guard_service.reset()
+                self._last_intelligence = None
                 
                 # تحديث الواجهة
                 if hasattr(self, 'recommendations_text'):
@@ -1411,7 +1666,7 @@ class ModernUI(QMainWindow):
                 if hasattr(self, 'prediction_text'):
                     self.prediction_text.setText("تم إعادة التعيين. جارٍ جمع بيانات جديدة...")
                 
-                self.log_event("✅ تم إعادة تعيين بيانات الذكاء الاصطناعي بنجاح")
+                self.log_event("تم إعادة تعيين بيانات الذكاء الاصطناعي بنجاح")
                 logger.info("تم إعادة تعيين بيانات AI")
                 QMessageBox.information(self, "نجح", "تم إعادة تعيين بيانات الذكاء الاصطناعي.\nسيبدأ التعلم من جديد.")
             except Exception as e:
@@ -1424,7 +1679,7 @@ class ModernUI(QMainWindow):
             event.ignore()
             self.hide()
             self.tray.show_message(
-                "BatteryGuard Pro",
+                "BatteryGuardAI",
                 "البرنامج لا يزال يعمل في الخلفية"
             )
         else:
@@ -1509,8 +1764,8 @@ class ModernUI(QMainWindow):
         self.optimizer.ai_engine = self.ai
         
         self.optimize_button.setEnabled(False)
-        self.optimize_button.setText("🤖 تحليل ذكي جارٍ...")
-        self.optimize_status.setText("🧠 الذكاء الاصطناعي يحلل أنماط الاستخدام ويحدد أفضل التحسينات...")
+        self.optimize_button.setText("تحليل ذكي جارٍ...")
+        self.optimize_status.setText("الذكاء الاصطناعي يحلل أنماط الاستخدام ويحدد أفضل التحسينات...")
         
         # تشغيل التحسين الذكي في خيط منفصل
         from PyQt6.QtCore import QThread, pyqtSignal
@@ -1527,7 +1782,7 @@ class ModernUI(QMainWindow):
             
             def run(self):
                 # إرسال تحديثات التقدم
-                self.progress.emit("🔍 تحليل حالة النظام...")
+                self.progress.emit("تحليل حالة النظام...")
                 
                 # تحسين ذكي متقدم
                 result = self.optimizer.optimize_battery(
@@ -1535,7 +1790,7 @@ class ModernUI(QMainWindow):
                     optimization_mode='intelligent'
                 )
                 
-                self.progress.emit("✅ اكتمل التحليل الذكي")
+                self.progress.emit("اكتمل التحليل الذكي")
                 self.optimization_done.emit(result)
         
         self.opt_thread = IntelligentOptimizationThread(self.optimizer, self.ai)
@@ -1550,7 +1805,7 @@ class ModernUI(QMainWindow):
     def _on_intelligent_optimization_complete(self, result):
         """معالجة نتيجة التحسين الذكي المتقدم"""
         self.optimize_button.setEnabled(True)
-        self.optimize_button.setText("🤖 تحسين ذكي متقدم")
+        self.optimize_button.setText("تحسين ذكي متقدم")
         
         if result['success']:
             power_saved = result.get('power_saved', 0)
@@ -1561,60 +1816,60 @@ class ModernUI(QMainWindow):
             personalized_actions = result.get('personalized_actions', [])
             
             # عرض النتائج الذكية
-            status_text = f"🤖 تم التحسين الذكي بنجاح!\n"
-            status_text += f"🎯 درجة الذكاء: {intelligence_score}% • 📊 تحسين متوقع: {predicted_improvement}%\n"
-            status_text += f"⚡ توفير فعلي: ~{power_saved:.1f}% • 🔧 تحسينات مطبقة: {actions_count}\n\n"
+            status_text = f"تم التحسين الذكي بنجاح!\n"
+            status_text += f"درجة الذكاء: {intelligence_score}% • تحسين متوقع: {predicted_improvement}%\n"
+            status_text += f"توفير فعلي: ~{power_saved:.1f}% • تحسينات مطبقة: {actions_count}\n\n"
             
             # عرض التوصيات الذكية
             if ai_recommendations:
-                status_text += "🧠 توصيات الذكاء الاصطناعي:\n"
+                status_text += "توصيات الذكاء الاصطناعي:\n"
                 for rec in ai_recommendations[:3]:  # أول 3 توصيات
                     status_text += f"   • {rec}\n"
                 status_text += "\n"
             
             # عرض التحسينات الرئيسية
-            status_text += "🚀 التحسينات المطبقة:\n"
+            status_text += "التحسينات المطبقة:\n"
             for action in result['actions'][:5]:  # أول 5 تحسينات
                 if action.get('success', True):
                     power_saved_action = action.get('power_saved', 0)
-                    status_text += f"   ✓ {action['name']}: {action['details']}"
+                    status_text += f"{action['name']}: {action['details']}"
                     if power_saved_action > 0:
                         status_text += f" (~{power_saved_action:.1f}%)"
                     status_text += "\n"
             
             # عرض التحسينات الشخصية
             if personalized_actions:
-                status_text += "\n🎯 تحسينات شخصية:\n"
+                status_text += "\n تحسينات شخصية:\n"
                 for action in personalized_actions:
-                    status_text += f"   ⭐ {action['name']}: {action['details']}\n"
+                    status_text += f"{action['name']}: {action['details']}\n"
             
             self.optimize_status.setText(status_text)
             self.optimize_status.setStyleSheet("font-size: 12px; color: #8b5cf6; background: transparent;")
             
             # تحديث شريط الحالة
-            self.status_label.setText(f"🤖 تحسين ذكي مكتمل - توفير ~{power_saved:.1f}%")
-            QTimer.singleShot(8000, lambda: self.status_label.setText("🟢 جاهز للعمل"))
+            self.status_label.setText(f"تحسين ذكي مكتمل - توفير ~{power_saved:.1f}%")
+            QTimer.singleShot(8000, lambda: self.status_label.setText("جاهز للعمل"))
             
             # تسجيل في السجل
-            self.log_event(f"🤖 تحسين ذكي مكتمل - درجة الذكاء: {intelligence_score}% - توفير: {power_saved:.1f}%")
+            self.log_event(f"تحسين ذكي مكتمل - درجة الذكاء: {intelligence_score}% - توفير: {power_saved:.1f}%")
             
             # إرسال إشعار ذكي
             if power_saved > 10:
                 self.send_notification(
-                    "تحسين ذكي مكتمل! 🤖",
+                    "تحسين ذكي مكتمل!",
                     f"تم توفير {power_saved:.1f}% من الطاقة بفضل الذكاء الاصطناعي",
                     "success"
                 )
         else:
             errors = result.get('errors', [])
-            error_text = "❌ حدث خطأ في التحسين الذكي"
+            error_text = "حدث خطأ في التحسين الذكي"
             if errors:
                 error_text += f"\nالأخطاء: {', '.join(errors[:2])}"
             
             self.optimize_status.setText(error_text)
             self.optimize_status.setStyleSheet("font-size: 12px; color: #ef4444; background: transparent;")
-            self.status_label.setText("❌ فشل التحسين الذكي")
-            QTimer.singleShot(3000, lambda: self.status_label.setText("🟢 جاهز للعمل"))
+            self.status_label.setText("فشل التحسين الذكي")
+            QTimer.singleShot(3000, lambda: self.status_label.setText("جاهز للعمل"))
     
     def _on_optimization_complete(self, result):
         """معالجة نتيجة التحسين العادي (للتوافق مع النسخة القديمة)"""
@@ -1636,7 +1891,7 @@ class ModernUI(QMainWindow):
             # كتابة السجل المصدر
             with open(filename, 'w', encoding='utf-8') as f:
                 f.write("=" * 70 + "\n")
-                f.write("BatteryGuard Pro - سجل الأحداث الكامل\n")
+                f.write("BatteryGuardAI - سجل الأحداث الكامل\n")
                 f.write("=" * 70 + "\n")
                 f.write(f"تاريخ التصدير: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write(f"إجمالي السجلات: {len(full_log.split(chr(10)))}\n")
@@ -1655,17 +1910,19 @@ class ModernUI(QMainWindow):
                 f.write(f"معدل الشحن: {stats.get('average_charge_rate', 0):.2f}%/دقيقة\n")
                 
                 health = self.monitor.get_battery_health()
-                f.write(f"\nصحة البطارية: {health['health_percentage']}%\n")
+                soh_value = health.get('health_percentage')
+                f.write(f"\nصحة البطارية: "
+                        f"{soh_value if soh_value is not None else t('health.unknown')}\n")
                 f.write(f"دورات الشحن: {health['cycle_count']}\n")
                 f.write(f"السعة التصميمية: {health['design_capacity']:.0f} mWh\n")
                 f.write(f"السعة الحالية: {health['full_capacity']:.0f} mWh\n")
             
-            self.status_label.setText(f"✅ تم تصدير السجل الكامل: {filename}")
-            QTimer.singleShot(3000, lambda: self.status_label.setText("🟢 جاهز للعمل"))
+            self.status_label.setText(f"تم تصدير السجل الكامل: {filename}")
+            QTimer.singleShot(3000, lambda: self.status_label.setText("جاهز للعمل"))
             self.log_event(f"تم تصدير السجل الكامل إلى {filename}")
         except Exception as e:
-            self.status_label.setText(f"❌ خطأ في التصدير: {str(e)}")
-            QTimer.singleShot(3000, lambda: self.status_label.setText("🟢 جاهز للعمل"))
+            self.status_label.setText(f"خطأ في التصدير: {str(e)}")
+            QTimer.singleShot(3000, lambda: self.status_label.setText("جاهز للعمل"))
             logger.error(f"خطأ في تصدير السجل: {e}")
     
     def _auto_save_data(self):
@@ -1679,37 +1936,68 @@ class ModernUI(QMainWindow):
         except Exception as e:
             logger.error(f"خطأ في الحفظ التلقائي: {e}")
     
-    def quit_application(self):
-        """إنهاء البرنامج بشكل كامل ونظيف"""
+    def quit_application(self, interactive: bool = True):
+        """
+        إنهاء البرنامج بشكل كامل ونظيف.
+
+        `interactive=False` يتخطّى نافذة التقدّم: عند `SIGTERM` من systemd أو
+        تسجيل الخروج لا يوجد مستخدم يقرأها، ورسم نافذة أثناء إغلاق الجلسة قد
+        يتعلّق حتى تنتهي مهلة النظام فتُقتل العملية بـ SIGKILL قبل التنظيف.
+        """
         if getattr(self, '_quitting', False):
             return
         self._quitting = True
-        
-        from PyQt6.QtWidgets import QProgressDialog
-        from PyQt6.QtCore import Qt as QtCore
-        
-        progress = QProgressDialog("جارٍ إغلاق التطبيق...", None, 0, 5, self)
-        progress.setWindowTitle("BatteryGuard Pro")
-        progress.setWindowModality(QtCore.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        progress.show()
-        QApplication.processEvents()
-        
+
+        progress = None
+        if interactive:
+            from PyQt6.QtCore import Qt as QtCore
+            from PyQt6.QtWidgets import QProgressDialog
+
+            progress = QProgressDialog("جارٍ إغلاق التطبيق...", None, 0, 5, self)
+            progress.setWindowTitle("BatteryGuardAI")
+            progress.setWindowModality(QtCore.WindowModality.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+            progress.show()
+            QApplication.processEvents()
+
+        def step(value: int, label: str = '') -> None:
+            if progress is None:
+                return
+            progress.setValue(value)
+            if label:
+                progress.setLabelText(label)
+            QApplication.processEvents()
+
         self.log_event("إيقاف البرنامج...")
-        
-        # 1) إيقاف المؤقتات
-        progress.setValue(1)
+        self._shutdown_sequence(step)
+
+        if progress is not None:
+            progress.close()
+        QApplication.quit()
+
+    def _shutdown_sequence(self, step=lambda value, label='': None):
+        """
+        خطوات الإغلاق النظيف بترتيبها الملزم.
+
+        الترتيب ليس اعتباطياً: الحارس أولاً لأن الإفراج عن عملية معلّقة يجب أن
+        يحدث قبل اختفاء من علّقها، ثم يتوقّف خيط المراقبة حتى لا يكتب أحد على
+        ملفات التعلّم بعد حفظها، ثم يُحفظ التعلّم أخيراً.
+        """
+        step(1)
         for timer_name in ('auto_save_timer', 'ai_timer', 'uptime_timer',
                            'auto_opt_stats_timer'):
             timer = getattr(self, timer_name, None)
             if timer is not None:
                 timer.stop()
-        
-        # 2) إيقاف التحسين التلقائي والتذكيرات
-        progress.setValue(2)
-        progress.setLabelText("إيقاف الخدمات الخلفية...")
-        QApplication.processEvents()
+
+        step(2, "إيقاف الخدمات الخلفية...")
+        # الحارس أولاً: أي عملية معلّقة يجب أن تُفرَج قبل أن يختفي من علّقها،
+        # وإلا بقيت متوقفة بلا سبب مفهوم للمستخدم.
+        try:
+            self.guard_service.shutdown()
+        except Exception as e:
+            logger.error(f"إيقاف الحارس: {e}")
         try:
             self.auto_optimizer.auto_optimize_enabled = False
             self.auto_optimizer.stop()
@@ -1719,30 +2007,23 @@ class ModernUI(QMainWindow):
             self.notification_manager.stop_all_reminders()
         except Exception as e:
             logger.debug(f"إيقاف التذكيرات: {e}")
-        
-        # 3) إيقاف خيط المراقبة بشكل تعاوني (بدون terminate غير الآمن)
-        progress.setValue(3)
-        progress.setLabelText("إيقاف المراقبة...")
-        QApplication.processEvents()
-        if hasattr(self, 'monitor_thread') and self.monitor_thread is not None:
+
+        step(3, "إيقاف المراقبة...")
+        if getattr(self, 'monitor_thread', None) is not None:
             self.monitor_thread.stop(timeout_ms=4000)
-        
-        # 4) حفظ البيانات
-        progress.setValue(4)
-        progress.setLabelText("حفظ البيانات...")
-        QApplication.processEvents()
+
+        step(4, "حفظ البيانات...")
         try:
-            self.ai.save_learning_data()
+            # `force`: الحفظ الدوري محدود بمهلة لتقليل الكتابة على القرص،
+            # وعند الخروج لا يجوز أن تمنع تلك المهلة حفظ ساعة من التعلّم.
+            self.ai.save_learning_data(force=True)
         except Exception as e:
-            logger.debug(f"حفظ نهائي: {e}")
-        
-        # 5) إخفاء الصينية والخروج
-        progress.setValue(5)
-        if hasattr(self, 'tray'):
+            logger.error(f"حفظ نهائي: {e}")
+
+        step(5)
+        if getattr(self, 'tray', None) is not None:
             self.tray.hide()
-        
-        progress.close()
-        QApplication.quit()
+        logger.info("اكتمل الإغلاق النظيف")
     
     def update_notification_settings(self):
         """تحديث إعدادات الإشعارات الذكية"""
@@ -1780,14 +2061,19 @@ class ModernUI(QMainWindow):
         try:
             current_percent = battery_status['percent']
             is_charging = battery_status['is_charging']
-            
-            # الحصول على صحة البطارية
+
+            # بطارية لا تُبلّغ: لا تنبيهات مستوى شحن مبنية على قياس غير صالح
+            if not battery_status.get('reporting', True):
+                self._last_charging_state = is_charging
+                return
+
+            # الصحة قد تكون غير معروفة على عتاد لا يوفّرها؛ لا نخترع 100٪
             health_info = self.monitor.get_battery_health()
-            battery_health = health_info.get('health_percentage', 100)
-            
-            # إرسال تنبيهات حدود البطارية
+            battery_health = health_info.get('health_percentage')
+
             self.notification_manager.send_battery_threshold_alert(
-                current_percent, is_charging, battery_health
+                current_percent, is_charging,
+                battery_health if battery_health is not None else 100
             )
             
             # فحص تغيير حالة الشاحن
@@ -1802,7 +2088,8 @@ class ModernUI(QMainWindow):
             # تنبيهات الاستخدام الذكية
             usage_data = {
                 'high_drain_detected': self._detect_high_drain(battery_status),
-                'temperature': battery_status.get('temperature', 0),
+                # الحرارة غير المتاحة تُمرَّر صفراً لأن المستقبل يقارنها بعتبة
+                'temperature': battery_status.get('temperature') or 0,
                 'unhealthy_charging_pattern': self._detect_unhealthy_charging()
             }
             
@@ -1815,8 +2102,9 @@ class ModernUI(QMainWindow):
                     self.notification_manager.send_ai_smart_alert(alert)
             
         except Exception as e:
-            logger.error(f"خطأ في فحص تنبيهات البطارية: {e}")
-    
+            # الأثر الكامل مطلوب: خطأ يتكرر كل دورتين بلا موضع لا يُصلَح
+            logger.error(f"خطأ في فحص تنبيهات البطارية: {e}", exc_info=True)
+
     def _detect_high_drain(self, battery_status: Dict) -> bool:
         """كشف الاستهلاك المرتفع"""
         try:
@@ -1855,13 +2143,18 @@ class ModernUI(QMainWindow):
                 battery_status['is_charging']
             )
             
-            # تحويل التوصيات المهمة إلى تنبيهات
-            for rec in recommendations:
-                if '🚨' in rec or '⚠️' in rec:
+            # التوصيات المهيكلة تحمل شدّتها، فلا حاجة لاستنتاجها من نص الرسالة
+            health = self.monitor.get_battery_health()
+            floor, ceiling = self.current_window()
+            for item in self.ai.get_advice(
+                    battery_status, health, floor, ceiling,
+                    control_available=self.monitor.capability.can_control,
+                    control_active=self.monitor.control_verified):
+                if item.severity in ('critical', 'warning'):
                     alerts.append({
-                        'type': 'usage_prediction',
-                        'message': rec,
-                        'confidence': 85
+                        'type': item.id,
+                        'message': t(item.key, **item.params),
+                        'confidence': 90 if item.evidence == 'measured' else 85,
                     })
             
             # فحص تدهور البطارية

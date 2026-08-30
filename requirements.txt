@@ -1,4 +1,4 @@
-# BatteryGuard Pro - المتطلبات
+# BatteryGuardAI - المتطلبات
 # Python 3.10+
 
 # واجهة المستخدم الرسومية

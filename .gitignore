@@ -1,71 +1,73 @@
-# Python
+# ═══════════════════════════════════════════════════════════
+# BatteryGuardAI - ما لا يُودَع
+#
+# نُظِّف من تكرار: كانت dist/ و build/ و .pytest_cache/ و .coverage مكرّرة
+# في كتلتين، وهو تكرار يُخفي ما يُقصد فعلاً استثناؤه.
+# ═══════════════════════════════════════════════════════════
+
+# ── بايثون ──
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-*.egg-info/
-dist/
-build/
 *.egg
+*.egg-info/
 .eggs/
 
-# PyInstaller
-*.spec.bak
+# ── نواتج البناء ──
+build/
+dist/
 build_env/
+*.spec.bak
+*.exe
+*.app
+*.dmg
 
-# Virtual Environment
+# ── البيئات الافتراضية ──
 venv/
 env/
 ENV/
 .venv
 
-# IDE
+# ── المحرّرات وأنظمة التشغيل ──
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# Logs
+# ── السجلات ──
 *.log
-batteryguard.log
-battery_events.log
 *.log.*
 
-# Settings (user data)
+# ── بيانات المستخدم: إعداداته وما تعلّمه التطبيق من جهازه ──
+# هذه تُكتب في ~/.config/batteryguard، والاستثناء هنا احتياط لمن يشغّل
+# التطبيق من مجلد المشروع مباشرة.
 battery_settings.json
 battery_ai_data.json
 auto_optimizer_settings.json
+battery_guard_state.json
+*.corrupt
 
-# Test artifacts
+# ── نواتج الاختبارات ──
 .pytest_cache/
 .qt-test-config/
 htmlcov/
 .coverage
+test_output/
 
-# Temporary files
+# ── ملفات مؤقتة ──
 *.tmp
 *.temp
 *.bak
 *.old
 
-# Build artifacts
-dist/
-build/
-*.exe
-*.app
-*.dmg
-
-# Test outputs
-test_output/
-.pytest_cache/
-.coverage
-
-# VBS files (generated)
+# ── ملفات يُولّدها التشغيل التلقائي على ويندوز ──
 run_background.vbs
+
+# ── ذاكرة أدوات خارجية ──
+.impeccable/

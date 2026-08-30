@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-الإعدادات الافتراضية لـ BatteryGuard Pro
-تُستخدم عند التشغيل الأول
+الإعدادات الافتراضية والثوابت المركزية - BatteryGuardAI
+
+هذا الملف هو المصدر الوحيد لاسم التطبيق وإصداره وقيمه الافتراضية.
+أي قيمة تتكرر في أكثر من موضع تُعرَّف هنا أولاً.
 """
+
+#: اسم التطبيق الرسمي الموحّد (كان يظهر سابقاً بصيغتين مختلفتين)
+APP_NAME = "BatteryGuardAI"
+
+#: معرّف المنظمة لتخزين QSettings
+APP_ORG = "BatteryGuard"
+
+#: إصدار التطبيق - مصدر واحد يقرؤه main.py والواجهة وملف البناء
+APP_VERSION = "3.0.0"
 
 # الإعدادات الافتراضية المنطقية
 DEFAULT_SETTINGS = {
@@ -82,6 +93,55 @@ DEFAULT_SETTINGS = {
     
     # التعلم من الاستخدام - مفعل افتراضياً
     "ai_learning_enabled": True,
+
+    # ═══════════════════════════════════════════════════════════
+    # نسب استهلاك الطاقة للعمليات (power_attribution)
+    # ═══════════════════════════════════════════════════════════
+
+    # قياس استهلاك كل عملية - مفعل افتراضياً (هو أساس معرفة من يُتلف البطارية)
+    "attribution_enabled": True,
+
+    # ثواني بين كل جولة قياس. أقل من 10 يجعل التطبيق نفسه حِملاً محسوساً،
+    # وأكثر من 60 يفقد القفزات القصيرة. القيمة تُقصّ إلى 10..300 في المنسّق.
+    "attribution_interval": 25,
+
+    # ═══════════════════════════════════════════════════════════
+    # حارس البطارية (guard_actions)
+    # ═══════════════════════════════════════════════════════════
+
+    # الحارس مفعل افتراضياً، لكنه يراقب ويُنبّه فقط
+    "guard_enabled": True,
+
+    # التنفيذ التلقائي - معطل افتراضياً: لا يتغيّر شيء في جهاز المستخدم
+    # بلا إذنه، حتى لو كان التغيير مفيداً وقابلاً للتراجع
+    "guard_automatic": False,
+
+    # أقصى شدّة مسموحة: alert | throttle | suspend
+    # (terminate غير مقبولة كسقف سياسة: لا إيقاف تلقائي أبداً)
+    "guard_max_action": "alert",
+
+    # لا تصرّف إلا على البطارية: أثناء الشحن الاستهلاك لا يُنقص عمر البطارية
+    # بنفس الطريقة، فالتدخّل فيه إزعاج بلا مقابل
+    "guard_only_on_battery": True,
+
+    # مستوى شحن يبدأ عنده التصرّف التلقائي (100 = في أي مستوى)
+    "guard_act_below_percent": 100,
+
+    # أقل درجة ضرر (0-100) تستدعي إجراءً
+    "guard_min_damage_score": 45,
+
+    # أقل ثقة (0-99) تستدعي إجراءً تلقائياً؛ ما دونها تنبيه فقط
+    "guard_min_confidence": 55,
+
+    # السماح بخفض أولوية المعالج (renice) وهو غير قابل للاستعادة على لينكس
+    # بلا صلاحيات - معطل افتراضياً
+    "guard_allow_irreversible_nice": False,
+
+    # أسماء عمليات يسمح المستخدم بالتصرّف تجاهها (فارغ = كلها مسموحة)
+    "guard_allowlist": "",
+
+    # أسماء عمليات يمنع المستخدم لمسها (تُضاف إلى القائمة المحمية)
+    "guard_blocklist": "",
     
     # ═══════════════════════════════════════════════════════════
     # إعدادات الواجهة
@@ -131,30 +191,71 @@ def get_default_settings():
     return DEFAULT_SETTINGS.copy()
 
 
+#: مفاتيح الحارس ونسب الطاقة وأنواعها. قائمة واحدة يقرؤها كل من يحتاجها
+#: (لوحة القياس ومتحكّم الخلفية) حتى لا تتفرّق القراءة في موضعين فتختلف.
+GUARD_SETTING_KEYS = (
+    ('guard_enabled', bool),
+    ('guard_automatic', bool),
+    ('guard_max_action', str),
+    ('guard_only_on_battery', bool),
+    ('guard_act_below_percent', int),
+    ('guard_min_damage_score', int),
+    ('guard_min_confidence', int),
+    ('guard_allow_irreversible_nice', bool),
+    ('guard_allowlist', list),
+    ('guard_blocklist', list),
+    ('attribution_enabled', bool),
+    ('attribution_interval', int),
+)
+
+
+def guard_settings_from(reader):
+    """
+    سياسة الحارس من أي مخزن إعدادات.
+
+    `reader(key, default, kind)` يعيد القيمة المحوّلة. هذا التجريد يسمح لنفس
+    المنطق أن يقرأ من `QSettings` في الواجهة ومن نفس المخزن في وضع الخلفية
+    بلا نافذة، فالسياسة واحدة في الحالتين لا سياستان تختلفان بصمت.
+
+    القوائم تُخزَّن نصوصاً مفصولة بفواصل لأن `QSettings` لا يحفظ القوائم
+    الفارغة بشكل موثوق عبر المنصات.
+    """
+    result = {}
+    for key, kind in GUARD_SETTING_KEYS:
+        default = DEFAULT_SETTINGS.get(key)
+        if kind is list:
+            raw = reader(key, default if isinstance(default, str) else '', str)
+            result[key] = [part.strip() for part in str(raw or '').split(',')
+                           if part.strip()]
+        else:
+            result[key] = reader(key, default, kind)
+    return result
+
+
 def get_first_run_message():
     """رسالة الترحيب عند التشغيل الأول"""
     return """
-🎉 مرحباً بك في BatteryGuard Pro!
+ مرحباً بك في BatteryGuardAI!
 
 هذا هو التشغيل الأول للبرنامج.
 
-📋 الإعدادات الافتراضية:
+ الإعدادات الافتراضية:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-✅ مفعّل افتراضياً:
+ مفعّل افتراضياً:
   • الإشعارات (بطارية منخفضة، اكتمال الشحن، إلخ)
   • الأصوات (5 أصوات مخصصة)
   • التذكيرات الذكية
   • توصيات الذكاء الاصطناعي
   • أيقونة الصينية
 
-❌ معطّل افتراضياً (يمكنك تفعيله من الإعدادات):
+ معطّل افتراضياً (يمكنك تفعيله من الإعدادات):
   • التشغيل التلقائي عند بدء النظام
   • وضع الخلفية
   • التحكم في حدود الشحن (يحتاج صلاحيات)
   • التحسين التلقائي
 
-💡 نصائح سريعة:
+ نصائح سريعة:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 1. للحصول على أفضل عمر للبطارية:
@@ -170,7 +271,7 @@ def get_first_run_message():
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-🚀 ابدأ الآن واستمتع بحماية ذكية لبطاريتك!
+ ابدأ الآن واستمتع بحماية ذكية لبطاريتك!
 """
 
 
@@ -178,7 +279,7 @@ def get_first_run_message():
 SOUND_ASSIGNMENTS = {
     'critical': {
         'file': 'sounds/new-notification-010-352755.mp3',
-        'name': '🚨 حرج',
+        'name': 'حرج',
         'description': 'بطارية منخفضة جداً (أقل من 10%)',
         'usage': [
             'بطارية حرجة (8%)',
@@ -188,7 +289,7 @@ SOUND_ASSIGNMENTS = {
     },
     'warning': {
         'file': 'sounds/new-notification-05-352453.mp3',
-        'name': '⚠️ تحذير',
+        'name': 'تحذير',
         'description': 'بطارية منخفضة (أقل من 20%)',
         'usage': [
             'بطارية منخفضة (18%)',
@@ -198,7 +299,7 @@ SOUND_ASSIGNMENTS = {
     },
     'info': {
         'file': 'sounds/new-notification-021-370045.mp3',
-        'name': '💡 معلومات',
+        'name': 'معلومات',
         'description': 'إشعارات عامة وتوصيات',
         'usage': [
             'توصيات الذكاء الاصطناعي',
@@ -208,7 +309,7 @@ SOUND_ASSIGNMENTS = {
     },
     'success': {
         'file': 'sounds/new-notification-022-370046.mp3',
-        'name': '✅ نجاح',
+        'name': 'نجاح',
         'description': 'اكتمال العمليات بنجاح',
         'usage': [
             'اكتمل الشحن (82%)',
@@ -218,7 +319,7 @@ SOUND_ASSIGNMENTS = {
     },
     'optimization': {
         'file': 'sounds/new-notification-024-370048.mp3',
-        'name': '🚀 تحسين',
+        'name': 'تحسين',
         'description': 'عمليات التحسين والتوفير',
         'usage': [
             'بدء التحسين',
@@ -237,17 +338,17 @@ def get_sound_info():
 if __name__ == '__main__':
     # عرض الإعدادات الافتراضية
     print("═" * 60)
-    print("  الإعدادات الافتراضية - BatteryGuard Pro")
+    print("  الإعدادات الافتراضية - BatteryGuardAI")
     print("═" * 60)
     
     settings = get_default_settings()
     
-    print("\n✅ مفعّل افتراضياً:")
+    print("\n مفعّل افتراضياً:")
     for key, value in settings.items():
         if value is True:
             print(f"  • {key}")
     
-    print("\n❌ معطّل افتراضياً:")
+    print("\n معطّل افتراضياً:")
     for key, value in settings.items():
         if value is False:
             print(f"  • {key}")

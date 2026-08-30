@@ -31,7 +31,7 @@ class TestBatteryStatus:
         # عزل قراءة sysfs حتى لا يتأثر الاختبار بجهاز حقيقي
         with patch.object(bm.psutil, 'sensors_battery',
                           return_value=FakeBattery(63, True, 7200)), \
-             patch.object(bm, '_battery_base_path', return_value=None):
+             patch.object(bm.hw, 'find_battery_path', return_value=None):
             mon = BatteryMonitor()
             status = mon.get_battery_status()
         assert status == {
@@ -39,10 +39,56 @@ class TestBatteryStatus:
             'is_charging': True,
             'time_left': 7200,
             'available': True,
+            'reporting': True,
             'power_draw': 0.0,
             'voltage': 0.0,
             'current': 0.0,
+            'temperature': None,
+            'temp_assumed': True,
+            'status_key': 'status.charging',
         }
+
+    def test_zero_charge_with_zero_voltage_is_not_reporting(self, tmp_path):
+        """
+        الحالة الحقيقية على عتاد ببطارية معطّلة: 0٪ و0 فولت و«Not charging».
+        يجب أن تُقرأ كبطارية لا تُبلّغ، لا كبطارية فارغة تستدعي تنبيهاً حرجاً.
+        """
+        bat = tmp_path / 'BAT0'
+        bat.mkdir()
+        (bat / 'status').write_text('Not charging')
+        (bat / 'voltage_now').write_text('0')
+        (bat / 'current_now').write_text('0')
+
+        with patch.object(bm.psutil, 'sensors_battery',
+                          return_value=FakeBattery(0, True, -1)), \
+             patch.object(bm.hw, 'find_battery_path', return_value=bat), \
+             patch.object(bm.hw, 'read_battery_temperature', return_value=None):
+            mon = BatteryMonitor()
+            status = mon.get_battery_status()
+
+        assert status['available'] is True
+        assert status['reporting'] is False
+        assert status['status_key'] == 'status.not_reporting'
+
+    def test_live_cell_with_voltage_is_reporting(self, tmp_path):
+        bat = tmp_path / 'BAT0'
+        bat.mkdir()
+        (bat / 'status').write_text('Discharging')
+        (bat / 'voltage_now').write_text('11400000')
+        (bat / 'current_now').write_text('1500000')
+
+        with patch.object(bm.psutil, 'sensors_battery',
+                          return_value=FakeBattery(57, False, 4000)), \
+             patch.object(bm.hw, 'find_battery_path', return_value=bat), \
+             patch.object(bm.hw, 'read_battery_temperature', return_value=31.5):
+            mon = BatteryMonitor()
+            status = mon.get_battery_status()
+
+        assert status['reporting'] is True
+        assert status['status_key'] == 'status.discharging'
+        assert status['power_draw'] == pytest.approx(17.1, abs=0.2)
+        assert status['temperature'] == 31.5
+        assert status['temp_assumed'] is False
 
     def test_psutil_exception_handled(self):
         with patch.object(bm.psutil, 'sensors_battery',

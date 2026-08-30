@@ -15,16 +15,59 @@ import logging
 import math
 import statistics
 import threading
+import time
 from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
+from battery_intelligence import (ANOMALY_WINDOW, ROBUST_Z_THRESHOLD,
+                                  robust_z_score)
+from battery_science import (Advice, BatterySnapshot, build_advice,
+                             days_to_end_of_life, equivalent_full_cycles,
+                             projected_annual_loss)
+from i18n import t
 from storage import JsonStore
 
 logger = logging.getLogger('BatteryGuard')
 
 # سقف موحد لسجل الاستخدام في الذاكرة وعلى القرص
 HISTORY_LIMIT = 2000
+
+# ─────────────────────────────────────────────────────────────
+# وتيرة العمل الثقيل
+#
+# قياس فعلي على سجل ممتلئ (2000 نقطة) على جهاز حقيقي:
+#   save_learning_data()      ≈ 840 مللي ثانية  (كلها ترميز JSON للسجل)
+#   _perform_deep_analysis()  ≈ 140 مللي ثانية  بلا الحفظ
+#
+# الوتيرة السابقة كانت: تحليل عميق كل 30 عيّنة وحفظ كل 50، أي عند عيّنة كل
+# ثانيتين: تحليل كل دقيقة وحفظ كل 100 ثانية. النتيجة نحو 1.5 ثانية معالج في
+# كل دقيقة، وكتابة نحو 200 كيلوبايت على القرص كل دقيقة.
+#
+# هذا نقيض غرض التطبيق مرتين: يحرق معالجاً، ويوقظ القرص باستمرار — وهو نفس
+# سلوك `disk_thrash` الذي يحذّر منه المستخدم. الأنماط السلوكية تتغيّر على مدى
+# ساعات لا ثوانٍ، فالتحليل كل عشر دقائق يعطي نفس النتيجة بجزء من الكلفة.
+#
+# الحفظ الأقل تكراراً صار آمناً لأن الإغلاق النظيف (lifecycle.py) يضمن حفظاً
+# قسرياً عند SIGTERM وتسجيل الخروج وإعادة التشغيل، فلا تُفقد ساعة من التعلّم
+# عند إغلاق الجهاز.
+# ─────────────────────────────────────────────────────────────
+
+#: كل كم عيّنة يجري التحليل العميق (عيّنة كل ثانيتين ⇒ نحو عشر دقائق)
+DEEP_ANALYSIS_EVERY = 300
+
+#: كل كم عيّنة تُحدَّث بصمة السلوك (عملية رخيصة على آخر 20 عيّنة)
+FINGERPRINT_EVERY = 60
+
+#: أقصر مدة بين كتابتين فعليتين على القرص (ثانية).
+#: حرس زمني فوق العدّادات: أي مسار يطلب الحفظ بتكرار أعلى لا يصل إلى القرص.
+MIN_SAVE_INTERVAL = 300.0
+
+# أطول فجوة بين عينتين تُحسب كزمن متصل (دقائق). ما بعدها = نوم/إيقاف.
+MAX_SAMPLE_GAP_MIN = 15
+
+# أصغر عمق تفريغ يُعدّ حدثاً يستحق الحساب (%)
+MIN_DISCHARGE_DEPTH = 3
 
 # طول النافذة المستخدمة للتنبؤ اللحظي بالانحدار الخطي
 REGRESSION_WINDOW = 40
@@ -62,6 +105,27 @@ class BatteryAI:
 
         # صحة العتاد الحقيقية (من sysfs/WMI) إن توفرت
         self._hardware_health: Optional[int] = None
+
+        # حرس الكتابة على القرص: آخر حفظ فعلي، وهل بقي تغيير غير محفوظ.
+        #
+        # `None` تعني «لم يُحفظ في هذه الجلسة» ولا يجوز استبدالها بـ 0.0:
+        # مرجع `time.monotonic()` اعتباطي ويبدأ قريباً من الصفر على جهاز أُقلع
+        # للتوّ، فتصير المقارنة `now - 0.0 < MIN_SAVE_INTERVAL` صحيحة ويُرفض
+        # **أول** حفظ خلال أول خمس دقائق من عمر الجهاز. اكتُشف هذا على عامل
+        # تكامل مستمر يبدأ من إقلاع نظيف، وأثره على المستخدم أن التعلّم في أول
+        # دقائق كل إقلاع لا يُكتب.
+        self._last_save_time: Optional[float] = None
+        self._save_pending = False
+
+        # عدّاد عيّنات تصاعدي لا يتوقّف.
+        #
+        # لا يجوز استخدام `len(usage_history)` لتحديد وتيرة العمل الثقيل: السجل
+        # مقصوص عند `HISTORY_LIMIT`، فبعد امتلائه يبقى طوله ثابتاً عند 2000
+        # إلى الأبد. وبما أن 2000 يقبل القسمة على 30 و50 و60، فإن **كل** عيّنة
+        # بعد الامتلاء كانت تُطلق تحليلاً عميقاً وكتابة كاملة على القرص. أي أن
+        # التطبيق كان يعمل بلا مشكلة أول ساعة ثم يبدأ حرق المعالج والكتابة كل
+        # ثانيتين بلا سبب ظاهر. القياس: 7.9٪ من نواة و300 كتابة لكل عشر دقائق.
+        self._sample_count = int(self.learning_data.get('sample_count', 0))
 
         # حقول يقرؤها الواجهة مباشرة
         self.learning_progress = int(self.learning_data.get('learning_progress', 0))
@@ -111,21 +175,45 @@ class BatteryAI:
             'ai_confidence_level': 0,
             'personalization_level': 0,
             'optimization_history': [],
+            #: عدّاد العيّنات التصاعدي؛ يحكم وتيرة العمل الثقيل عبر الجلسات
+            'sample_count': 0,
             'last_updated': None,
         }
 
-    def save_learning_data(self):
-        """حفظ بيانات التعلم (كتابة ذرية آمنة بين الخيوط)"""
+    def save_learning_data(self, force: bool = False) -> bool:
+        """
+        حفظ بيانات التعلم (كتابة ذرية آمنة بين الخيوط).
+
+        ترميز السجل الممتلئ إلى JSON يكلّف نحو 840 مللي ثانية ويكتب مئات
+        الكيلوبايتات، فالكتابة محدودة بـ `MIN_SAVE_INTERVAL`. أي نداء أسرع من
+        ذلك يُهمل بصمت ويُعاد `False`، إلا أن يكون `force=True`.
+
+        `force=True` تُستخدم في مسار الإغلاق وعند إعادة التعيين: هناك الحفظ
+        واجب لا اختياري، ولا يجوز أن يمنعه مؤقّت.
+        """
+        now = time.monotonic()
         with self._lock:
+            throttled = (self._last_save_time is not None
+                         and (now - self._last_save_time) < MIN_SAVE_INTERVAL)
+            if not force and throttled:
+                self._save_pending = True
+                return False
+
             self.learning_data['usage_history'] = self.usage_history[-HISTORY_LIMIT:]
             self.learning_data['last_updated'] = datetime.now().isoformat()
             self.learning_data['prediction_accuracy_history'] = self.prediction_accuracy[-50:]
             self.learning_data['learning_progress'] = self.learning_progress
             self.learning_data['ai_maturity_level'] = self.ai_maturity_level
             self.learning_data['personalization_level'] = self.personalization_score
-            snapshot = dict(self.learning_data)
+            self.learning_data['sample_count'] = self._sample_count
+            points = len(self.learning_data['usage_history'])
+            self._last_save_time = now
+            self._save_pending = False
+
         if self.store.save():
-            logger.debug(f"تم حفظ بيانات AI ({len(snapshot.get('usage_history', []))} نقطة)")
+            logger.debug(f"تم حفظ بيانات AI ({points} نقطة)")
+            return True
+        return False
 
     def reset(self):
         """
@@ -148,7 +236,10 @@ class BatteryAI:
             self.personalization_score = 0
             self.learning_data.clear()
             self.learning_data.update(defaults)
-        self.save_learning_data()
+            self._last_save_time = None
+            self._sample_count = 0
+        # إعادة التعيين تُكتب فوراً: المستخدم طلب المسح ويتوقّع أثره الآن
+        self.save_learning_data(force=True)
         logger.info("تمت إعادة تعيين بيانات الذكاء الاصطناعي")
 
     # ──────────────────────────────────────────────────────────────
@@ -182,18 +273,23 @@ class BatteryAI:
 
             self._detect_instant_anomalies(entry)
 
+            # العدّاد التصاعدي هو مرجع الوتيرة، لا طول السجل المقصوص
+            self._sample_count += 1
+            counter = self._sample_count
             n = len(self.usage_history)
-            deep_due = (n % 30 == 0)
-            save_due = (n % 50 == 0)
+            deep_due = (counter % DEEP_ANALYSIS_EVERY == 0)
+            fingerprint_due = (counter % FINGERPRINT_EVERY == 0)
 
         if deep_due and n >= 50:
             self._perform_deep_analysis()
-        elif n % 10 == 0:
+        elif fingerprint_due:
             with self._lock:
                 self.learning_data['learning_iterations'] += 1
                 self._update_behavior_fingerprint(self.usage_history[-20:])
 
-        if save_due or deep_due:
+        # الحفظ يقرّر بنفسه: `MIN_SAVE_INTERVAL` هو الحاكم، لا عدّاد العيّنات.
+        # المحاولة رخيصة (مقارنة زمن) والكتابة وحدها هي المكلفة.
+        if deep_due or fingerprint_due:
             self.save_learning_data()
 
     def _update_ewma_rates(self, entry: Dict):
@@ -393,6 +489,7 @@ class BatteryAI:
             self._update_weekly_patterns()
             self._calculate_learning_progress()
             self.last_analysis_time = datetime.now()
+        # الحفظ محدود بمهلته: التحليل العميق لا يفرض كتابة على القرص
         self.save_learning_data()
         logger.info("اكتمل التحليل العميق الدوري للبيانات")
 
@@ -700,23 +797,38 @@ class BatteryAI:
             self.learning_data['weekday_usage_pattern'] = statistics.mean(weekday_levels)
 
     def _detect_instant_anomalies(self, current_entry: Dict):
-        """كشف الاستهلاك غير الطبيعي فورياً"""
-        if len(self.usage_history) < 10:
+        """
+        كشف الاستهلاك غير الطبيعي بدرجة z متينة (وسيط + انحراف مطلق وسيطي).
+
+        الطريقة السابقة كانت «أكبر من ضعف متوسط آخر عشر قراءات»، وفيها عيبان
+        جوهريان: القراءة الشاذة نفسها تدخل في المتوسط فترفعه وتُسكِت الكشف
+        بعدها، والعتبة الثابتة 10 واط تعني أن جهازاً منخفض الاستهلاك لا يُكتشف
+        فيه شذوذ أبداً. الوسيط لا تفسده القيم الشاذة، والحدّ نسبي لا مطلق.
+        """
+        current_power = float(current_entry.get('power_draw', 0) or 0)
+        if current_power <= 0:
             return
-        recent = self.usage_history[-10:]
-        powers = [e.get('power_draw', 0) for e in recent if e.get('power_draw', 0) > 0]
-        if not powers:
+
+        # نافذة أطول من عشر قراءات: الوسيط يحتاج بيانات ليكون خط أساس
+        window = [float(e.get('power_draw', 0) or 0)
+                  for e in self.usage_history[-ANOMALY_WINDOW - 1:-1]
+                  if float(e.get('power_draw', 0) or 0) > 0]
+        score = robust_z_score(current_power, window)
+        if score is None or score < ROBUST_Z_THRESHOLD:
             return
-        avg_power = statistics.mean(powers)
-        current_power = current_entry.get('power_draw', 0)
-        if current_power > avg_power * 2 and current_power > 10:
-            self.anomaly_detector.add_anomaly({
-                'type': 'high_power_consumption',
-                'timestamp': current_entry['timestamp'],
-                'value': current_power,
-                'average': avg_power,
-                'message': f"استهلاك طاقة مرتفع: {current_power:.1f}W (المتوسط: {avg_power:.1f}W)",
-            })
+
+        baseline = statistics.median(window)
+        self.anomaly_detector.add_anomaly({
+            'type': 'high_power_consumption',
+            'timestamp': current_entry['timestamp'],
+            'value': round(current_power, 2),
+            'average': round(baseline, 2),
+            'z_score': round(score, 2),
+            'severity': 'critical' if score >= ROBUST_Z_THRESHOLD * 2 else 'warning',
+            'key': 'anomaly.high_power',
+            'params': {'value': round(current_power, 1),
+                       'baseline': round(baseline, 1)},
+        })
 
     def _update_behavior_fingerprint(self, recent_data: List[Dict]):
         """تحديث بصمة سلوك المستخدم"""
@@ -751,121 +863,205 @@ class BatteryAI:
     # التوصيات
     # ──────────────────────────────────────────────────────────────
 
-    def get_smart_recommendations(self, current_battery: int, is_charging: bool) -> List[str]:
-        """توليد توصيات ذكية مرتبة حسب الأولوية"""
-        recommendations: List[str] = []
-        current_hour = datetime.now().hour
-        current_day = datetime.now().weekday()
+    # ──────────────────────────────────────────────────────────────
+    # ملف الاستخدام المرصود (أساس كل تقدير تآكل)
+    # ──────────────────────────────────────────────────────────────
+
+    def usage_profile(self, ceiling: int = 80) -> Dict:
+        """
+        ملف الاستخدام الفعلي من السجل: كم من الوقت فوق السقف، وكم على
+        البطارية، وما أعماق التفريغ المرصودة، وتوزيع الوقت على مستويات الشحن.
+
+        الفجوات الأطول من `MAX_SAMPLE_GAP_MIN` تُستثنى: نوم الجهاز ليس
+        زمن بقاء عند مستوى شحن، وحسابه كذلك يضخّم التقدير.
+        """
+        with self._lock:
+            history = list(self.usage_history)
+
+        profile = {
+            'minutes_total': 0.0,
+            'minutes_plugged': 0.0,
+            'minutes_on_battery': 0.0,
+            'minutes_high_soc': 0.0,
+            'soc_histogram': {},
+            'discharge_events': [],
+            'observed_days': 0.0,
+        }
+        if len(history) < 2:
+            return profile
+
+        histogram: Dict[int, float] = defaultdict(float)
+        events: List[float] = []
+        run_start: Optional[float] = None
+        previous_percent: Optional[float] = None
+
+        for index in range(1, len(history)):
+            prev, curr = history[index - 1], history[index]
+            try:
+                delta_min = (datetime.fromisoformat(curr['timestamp']) -
+                             datetime.fromisoformat(prev['timestamp'])).total_seconds() / 60.0
+            except (KeyError, ValueError):
+                continue
+            if not (0 < delta_min <= MAX_SAMPLE_GAP_MIN):
+                # فجوة طويلة: أغلق أي تفريغ مفتوح ولا تحسب الزمن
+                if run_start is not None and previous_percent is not None:
+                    depth = run_start - previous_percent
+                    if depth >= MIN_DISCHARGE_DEPTH:
+                        events.append(depth)
+                    run_start = None
+                previous_percent = curr.get('battery_percent')
+                continue
+
+            percent = float(prev.get('battery_percent', 0))
+            charging = bool(prev.get('is_charging'))
+
+            profile['minutes_total'] += delta_min
+            if charging:
+                profile['minutes_plugged'] += delta_min
+            else:
+                profile['minutes_on_battery'] += delta_min
+            if percent > ceiling:
+                profile['minutes_high_soc'] += delta_min
+            histogram[int(percent // 10 * 10)] += delta_min
+
+            # أعماق التفريغ: بداية كل هبوط متصل وحتى انعكاسه
+            current_percent = float(curr.get('battery_percent', percent))
+            if not charging and current_percent < percent:
+                if run_start is None:
+                    run_start = percent
+            elif run_start is not None:
+                depth = run_start - percent
+                if depth >= MIN_DISCHARGE_DEPTH:
+                    events.append(depth)
+                run_start = None
+            previous_percent = current_percent
+
+        if run_start is not None and previous_percent is not None:
+            depth = run_start - previous_percent
+            if depth >= MIN_DISCHARGE_DEPTH:
+                events.append(depth)
+
+        profile['soc_histogram'] = dict(histogram)
+        profile['discharge_events'] = events
+        profile['observed_days'] = round(profile['minutes_total'] / 1440.0, 3)
+        return profile
+
+    def wear_projection(self, ceiling: int = 80, temp_c: Optional[float] = None,
+                        soh_percent: Optional[float] = None) -> Dict:
+        """
+        تقدير التآكل السنوي (تقويمي + دوري) والزمن المتبقي حتى حدّ نهاية
+        العمر الافتراضي، مبنياً على ملف الاستخدام المرصود لا على افتراضات.
+        """
+        profile = self.usage_profile(ceiling)
+        loss = projected_annual_loss(
+            soc_profile=profile['soc_histogram'] or None,
+            temp_c=temp_c,
+            discharge_events=profile['discharge_events'] or None,
+            days_observed=max(0.5, profile['observed_days']),
+        )
+        health = soh_percent if soh_percent is not None else self._hardware_health
+        return {
+            **loss,
+            'observed_days': profile['observed_days'],
+            'equivalent_cycles': round(
+                equivalent_full_cycles(sum(profile['discharge_events'])), 2),
+            'hours_high_soc_per_day': round(
+                profile['minutes_high_soc'] / 60.0 / max(0.5, profile['observed_days']), 2),
+            'hours_plugged_per_day': round(
+                profile['minutes_plugged'] / 60.0 / max(0.5, profile['observed_days']), 2),
+            'hours_on_battery_per_day': round(
+                profile['minutes_on_battery'] / 60.0 / max(0.5, profile['observed_days']), 2),
+            'typical_dod': round(
+                statistics.median(profile['discharge_events']), 1) if profile['discharge_events'] else 0.0,
+            'days_to_eol': days_to_end_of_life(health, loss['total']),
+            'soh_percent': health,
+        }
+
+    # ──────────────────────────────────────────────────────────────
+    # النصائح المهيكلة
+    # ──────────────────────────────────────────────────────────────
+
+    def snapshot(self, battery_status: Dict, health: Optional[Dict] = None,
+                 floor: int = 40, ceiling: int = 80,
+                 control_available: bool = False,
+                 control_active: bool = False) -> BatterySnapshot:
+        """بناء لقطة الحالة التي يعمل عليها محرك النصائح"""
+        health = health or {}
+        temp = battery_status.get('temperature')
+        projection = self.wear_projection(ceiling, temp, health.get('health_percentage'))
 
         with self._lock:
-            confidence_base = self._calculate_confidence()
-            drain_rate = self._ewma_drain_rate or float(self.learning_data.get('average_drain_rate', 0) or 0)
-            charge_rate = self._ewma_charge_rate or float(self.learning_data.get('average_charge_rate', 0) or 0)
-            peak_drain = float(self.learning_data.get('peak_drain_rate', 0) or 0)
-            efficiency = int(self.learning_data.get('efficiency_score', 100))
-            health = int(self.learning_data.get('health_score', 100))
-            typical_start = float(self.behavior_model.get('typical_charge_start', 0) or 0)
-            expected_next = float(self.predictions.get('expected_battery_next_hour', 0) or 0)
+            drain = self._ewma_drain_rate or float(self.learning_data.get('average_drain_rate', 0) or 0)
+            charge = self._ewma_charge_rate or float(self.learning_data.get('average_charge_rate', 0) or 0)
             heavy_hours = list(self.learning_data.get('heavy_usage_hours', []))
-            anomalies = self.anomaly_detector.get_recent_anomalies()
-            weekly_pattern = self.learning_data.get('weekly_patterns', {}).get(current_day, {})
-            fingerprint = self.learning_data.get('user_behavior_fingerprint', {})
 
-        # حرج جداً - أولوية قصوى
-        if current_battery < 10 and not is_charging:
-            return ["🚨 حرج جداً! البطارية أقل من 10% - وصّل الشاحن فوراً!"]
+        return BatterySnapshot(
+            percent=float(battery_status.get('percent', 0)),
+            is_charging=bool(battery_status.get('is_charging')),
+            reporting=bool(battery_status.get('reporting', True)),
+            temp_c=temp,
+            soh_percent=health.get('health_percentage'),
+            cycle_count=health.get('cycle_count'),
+            drain_rate_pct_min=drain,
+            charge_rate_pct_min=charge,
+            hours_high_soc_per_day=projection['hours_high_soc_per_day'],
+            hours_plugged_per_day=projection['hours_plugged_per_day'] or 12.0,
+            hours_on_battery_per_day=projection['hours_on_battery_per_day'],
+            typical_dod=projection['typical_dod'],
+            night_usage_score=float(
+                (self.learning_data.get('user_behavior_fingerprint') or {})
+                .get('night_owl_score', 0) or 0),
+            control_available=control_available,
+            control_active=control_active,
+            ceiling=int(ceiling),
+            floor=int(floor),
+            heavy_usage_hours=heavy_hours,
+            hour=datetime.now().hour,
+        )
 
-        # مستويات البطارية (ترتيب صحيح: الأشد أولاً - خطأ سابق جعل >95 لا يُصل أبداً)
-        if current_battery >= 95 and is_charging:
-            recommendations.append("⚡ شحن زائد! افصل الشاحن فوراً - يضر بصحة البطارية")
-        elif current_battery > 85 and is_charging:
-            recommendations.append("✅ مستوى ممتاز! يمكن فصل الشاحن الآن")
-        elif current_battery < 15 and not is_charging:
-            recommendations.append("⚠️ تحذير: البطارية منخفضة جداً! وصّل الشاحن الآن")
-        elif current_battery < 20 and not is_charging and drain_rate > 0:
-            remaining = (current_battery - 10) / drain_rate
-            recommendations.append(f"⚠️ البطارية منخفضة! متبقي ~{int(remaining)} دقيقة قبل 10%")
-        elif 40 <= current_battery <= 80 and not is_charging:
-            recommendations.append("✨ النطاق الصحي المثالي! استمر هكذا")
-
-        # معدل الاستنزاف اللحظي
-        if not is_charging and drain_rate > 1.5:
-            recommendations.append(f"⚡ استنزاف مرتفع ({drain_rate:.2f}%/د) - قلل الاستخدام المكثف")
-        elif not is_charging and 0 < drain_rate < 0.5:
-            recommendations.append(f"💚 استنزاف منخفض ({drain_rate:.2f}%/د) - استخدام مثالي!")
-
-        # ساعات الذروة
-        if current_hour in heavy_hours and current_battery < 60 and not is_charging:
-            recommendations.append(f"📊 AI: ساعة استخدام مكثف ({current_hour}:00) - يُنصح بالشحن")
-
-        # عادة الشحن الشخصية
-        if typical_start > 0 and not is_charging and current_battery < typical_start - 10:
-            rec_conf = min(95, confidence_base + 10)
-            recommendations.append(
-                f"💡 عادةً تشحن عند {int(typical_start)}% - حان الوقت؟ (ثقة: {rec_conf}%)")
-
-        # تنبؤ الساعة القادمة
-        if 0 < expected_next < 20 and current_battery > 30:
-            pred_conf = self._get_prediction_confidence()
-            recommendations.append(
-                f"🔮 AI: متوقع انخفاض لـ {int(expected_next)}% خلال ساعة (ثقة: {pred_conf}%)")
-
-        # الكفاءة والصحة
-        if efficiency < 60:
-            recommendations.append(f"⚠️ كفاءة منخفضة ({efficiency}%) - حافظ على 40-80%")
-        elif efficiency > 85:
-            recommendations.append(f"🌟 كفاءة ممتازة ({efficiency}%)! استمر")
-
-        if health < 70:
-            recommendations.append(f"💊 صحة البطارية ({health}%) - تجنب الشحن الكامل والتفريغ العميق")
-        elif health > 90:
-            recommendations.append(f"💪 صحة ممتازة ({health}%)!")
-
-        # شذوذات حديثة
-        if anomalies and anomalies[-1].get('type') == 'high_power_consumption':
-            recommendations.append(f"⚠️ {anomalies[-1]['message']}")
-
-        # نمط اليوم
-        if weekly_pattern and weekly_pattern.get('intensity') == 'high':
-            if current_battery < 60 and not is_charging:
-                recommendations.append(
-                    f"📅 {weekly_pattern['day']}: يوم استخدام مكثف - يُنصح بالشحن")
-
-        # نمط ليلي (بأسبقية صحيحة بعد إصلاح خطأ الأقواس)
-        night_owl = float(fingerprint.get('night_owl_score', 0) or 0)
-        is_night = current_hour >= 22 or current_hour <= 6
-        if night_owl > 50 and is_night and current_battery < 50 and not is_charging:
-            recommendations.append("🌙 استخدام ليلي متوقع - يُنصح بالشحن الآن")
-
-        # وقت الوصول لـ 80%
-        if is_charging and current_battery < 30 and charge_rate > 0:
-            time_to_80 = (80 - current_battery) / charge_rate
-            recommendations.append(f"⏱️ متبقي ~{int(time_to_80)} دقيقة للوصول لـ 80%")
-
-        if not is_charging and current_battery > 90:
-            recommendations.append("💡 استخدم البطارية حتى 40% قبل الشحن التالي")
-
-        final = recommendations[:7]
+    def get_advice(self, battery_status: Dict, health: Optional[Dict] = None,
+                   floor: int = 40, ceiling: int = 80,
+                   control_available: bool = False,
+                   control_active: bool = False, limit: int = 6) -> List[Advice]:
+        """
+        نصائح مهيكلة (شدّة + مفتاح ترجمة + سند + إجراء) من محرك علم البطارية.
+        الواجهة هي من تترجم وتعرض؛ هذه الطبقة لا تعرف شيئاً عن النصوص.
+        """
+        snap = self.snapshot(battery_status, health, floor, ceiling,
+                             control_available, control_active)
+        advice = build_advice(snap, limit=limit)
         with self._lock:
-            self.learning_data['recommendations'] = final
+            self.learning_data['recommendations'] = [a.id for a in advice]
             self.learning_data['last_recommendation_time'] = datetime.now().isoformat()
-        return final
+        return advice
+
+    def get_smart_recommendations(self, current_battery: int, is_charging: bool,
+                                  ceiling: int = 80, floor: int = 40) -> List[str]:
+        """
+        نصوص التوصيات جاهزة للعرض. غلاف رفيع فوق `get_advice` يبقي التوافق
+        مع المستدعين الذين يحتاجون نصوصاً مباشرة.
+        """
+        advice = self.get_advice(
+            {'percent': current_battery, 'is_charging': is_charging, 'reporting': True},
+            floor=floor, ceiling=ceiling)
+        return [t(item.key, **item.params) for item in advice]
 
     def get_optimization_recommendations(self, current_battery: int, is_charging: bool) -> List[str]:
-        """توصيات تحسين النظام بناءً على الحالة"""
-        recs: List[str] = []
+        """توصيات تحسين النظام بناءً على الحالة المرصودة"""
         with self._lock:
-            drain_rate = float(self.learning_data.get('average_drain_rate', 0) or 0)
+            drain_rate = self._ewma_drain_rate or float(
+                self.learning_data.get('average_drain_rate', 0) or 0)
             efficiency = int(self.learning_data.get('efficiency_score', 100))
 
+        recs: List[str] = []
         if current_battery < 20 and not is_charging:
-            recs.append("🔋 البطارية منخفضة - يُنصح بتحسين النظام لتوفير الطاقة")
+            recs.append(t('opt.low_battery'))
         elif current_battery < 40 and not is_charging:
-            recs.append("⚡ تحسين النظام سيساعد في إطالة عمر البطارية")
+            recs.append(t('opt.extend_runtime'))
         if drain_rate > 1.5:
-            recs.append("📊 معدل استنزاف مرتفع - التحسين سيقلل الاستهلاك")
+            recs.append(t('opt.high_drain', rate=round(drain_rate, 2)))
         if efficiency < 70:
-            recs.append("🎯 كفاءة منخفضة - التحسين سيحسن الأداء")
+            recs.append(t('opt.low_efficiency', score=efficiency))
         return recs[:3]
 
     # ──────────────────────────────────────────────────────────────

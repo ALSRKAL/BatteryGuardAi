@@ -8,13 +8,19 @@
 - إيقاف تعاوني عبر threading.Event بدلاً من QThread.terminate() غير الآمن.
 - لا يكرر منطق تنبيهات العتبات: مدير الإشعارات هو المصدر الوحيد لقرار
   الإشعارات، وهذا الخيط يبث البيانات الخام فقط.
+- يشغّل خطّ الحارس (`guard_service`) على وتيرته الخاصة الأبطأ: جولة نسب
+  الطاقة تقرأ عدّادات مئات العمليات، وتشغيلها كل ثانيتين يجعل التطبيق نفسه
+  من أكبر مستنزفي البطارية.
 """
 
 import logging
+import threading
 import time
-from typing import Dict
+from typing import Dict, Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
+
+from i18n import t
 
 logger = logging.getLogger('BatteryGuard')
 
@@ -29,14 +35,18 @@ class MonitorThread(QThread):
 
     battery_updated = pyqtSignal(dict)
     notification_requested = pyqtSignal(str, str, str)
+    #: تقرير استدلال جديد (IntelligenceReport) - يُبَث حين تكتمل جولة نسب
+    intelligence_updated = pyqtSignal(object)
 
-    def __init__(self, monitor, ai, settings: Dict):
+    def __init__(self, monitor, ai, settings: Dict, guard_service=None):
         super().__init__()
         self.monitor = monitor
         self.ai = ai
         self.settings = dict(settings)
-        self._stop_event = __import__('threading').Event()
-        self.interval_override: int = None  # فرض فاصل ثابت عند الحاجة
+        #: خطّ الاستدلال والحماية؛ `None` يعني تشغيلاً بلا حارس
+        self.guard_service = guard_service
+        self._stop_event = threading.Event()
+        self.interval_override: Optional[int] = None  # فرض فاصل ثابت عند الحاجة
 
     # ── التحكم بالدورة الحياتية ─────────────────────────────────
 
@@ -60,6 +70,11 @@ class MonitorThread(QThread):
     def update_settings(self, settings: Dict):
         """تحديث الإعدادات مباشرة من خيط الواجهة"""
         self.settings = dict(settings)
+        if self.guard_service is not None:
+            try:
+                self.guard_service.apply_settings(self.settings)
+            except Exception as e:
+                logger.error(f"تعذّر تحديث سياسة الحارس: {e}")
 
     # ── حلقة المراقبة ────────────────────────────────────────────
 
@@ -71,23 +86,28 @@ class MonitorThread(QThread):
                 battery_status = self.monitor.get_battery_status()
 
                 if battery_status['available']:
-                    # تغذية محرك الذكاء الاصطناعي وصحة العتاد
+                    # تغذية محرك التحليل وصحة العتاد
                     self.ai.analyze_usage_pattern(battery_status)
                     health_info = self.monitor.get_battery_health()
-                    if health_info.get('health_percentage'):
+                    if health_info.get('health_percentage') is not None:
                         self.ai.update_hardware_health(health_info['health_percentage'])
 
-                    # التحقق من حدود الشحن (تحكم فعلي وليس إشعار عتبات)
-                    charge_action = self.monitor.check_charge_limits(
-                        battery_status['percent'],
-                        battery_status['is_charging']
-                    )
-                    if charge_action['action'] != 'none' and charge_action.get('should_notify'):
-                        self.notification_requested.emit(
-                            "⚡ التحكم في الشحن",
-                            charge_action['message'],
-                            'normal'
+                    # خطّ الحارس يقرّر بنفسه متى تحين جولته (وتيرة أبطأ)
+                    self._run_guard(battery_status, health_info)
+
+                    # بطارية لا تُبلّغ: لا قرارات حدود مبنية على قياس غير صالح
+                    if battery_status.get('reporting', True):
+                        charge_action = self.monitor.check_charge_limits(
+                            battery_status['percent'],
+                            battery_status['is_charging']
                         )
+                        if charge_action['action'] != 'none' and charge_action.get('should_notify'):
+                            self.notification_requested.emit(
+                                t('control.title'),
+                                t(charge_action.get('message_key', 'control.title'),
+                                  **charge_action.get('params', {})),
+                                'normal'
+                            )
 
                     self.battery_updated.emit(battery_status)
                     error_streak = 0
@@ -104,6 +124,20 @@ class MonitorThread(QThread):
                 self._sleep(backoff)
         logger.info("انتهى خيط المراقبة")
 
+    def _run_guard(self, battery_status: Dict, health_info: Dict):
+        """
+        جولة الحارس. فشلها يُسجَّل ولا يُوقف المراقبة: قراءة البطارية والتنبيه
+        عند انخفاضها أهمّ من تحليل العمليات، فلا يجوز أن يُسقطها خطأ فيه.
+        """
+        if self.guard_service is None:
+            return
+        try:
+            report = self.guard_service.step(battery_status, health_info)
+            if report is not None:
+                self.intelligence_updated.emit(report)
+        except Exception as e:
+            logger.error(f"خطأ في جولة الحارس: {e}")
+
     def _compute_interval(self, status: Dict) -> float:
         """اختيار الفاصل: ثابت إن فُرض، وإلا تكيفي حسب الحالة"""
         if self.interval_override:
@@ -111,12 +145,15 @@ class MonitorThread(QThread):
         percent = status['percent']
         charging = status['is_charging']
 
+        # كانت هذه القراءة تستخدم getattr على قاموس، فتعيد الافتراضي دائماً
+        # وتُفقد الحدود المخصّصة أثرها على وتيرة المراقبة.
+        limits = self.settings.get('battery_thresholds') or {}
         thresholds = [
             self.settings.get('low_battery_threshold', 20),
-            getattr(self.settings.get('battery_thresholds', None) or {}, 'critical_low', 10),
-            getattr(self.settings.get('battery_thresholds', None) or {}, 'optimal_max', 80),
+            limits.get('critical_low', 10),
+            limits.get('optimal_max', self.settings.get('max_charge_limit', 80)),
         ]
-        near_boundary = any(abs(percent - t) <= IDLE_MARGIN for t in thresholds)
+        near_boundary = any(abs(percent - limit) <= IDLE_MARGIN for limit in thresholds)
 
         if not charging or near_boundary or percent <= 20:
             return INTERVAL_ACTIVE

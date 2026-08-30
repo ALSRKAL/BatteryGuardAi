@@ -2,71 +2,98 @@
 # -*- coding: utf-8 -*-
 """اختبارات مدير التشغيل التلقائي واختبار دخان للتطبيق الكامل"""
 
+import sys
+
 import pytest
 
+import service_installer
 from autostart_manager import AutostartManager
 
+LINUX_ONLY = pytest.mark.skipif(not sys.platform.startswith('linux'),
+                                reason='لينكس فقط')
 
+
+@LINUX_ONLY
 class TestLinuxAutostart:
-    def test_desktop_entry_quotes_paths(self, isolated_data_dir, monkeypatch):
-        """مسارات بفراغات/حروف عربية يجب اقتباسها في Exec"""
-        if not __import__('sys').platform.startswith('linux'):
-            pytest.skip('لينكس فقط')
+    """
+    `AutostartManager` صار غلافاً فوق `service_installer`، فالمُختبَر هنا هو
+    التفويض الصحيح لا كتابة الملف: كتابة الملف تُختبر في `test_service.py`.
+    """
 
-        mgr = AutostartManager()
-        # فرض وضع تطوير بمسار فيه فراغات
-        monkeypatch.setattr(mgr, 'is_frozen', False)
-        monkeypatch.setattr(mgr, 'python_path', '/home/user with space/py 3')
+    def test_enable_delegates_to_installer(self, isolated_xdg_config, monkeypatch):
+        """التفعيل يستخدم أفضل طريقة متوفّرة ويُبلّغ عنها"""
+        recorded = {}
+
+        def fake_install(prefer_systemd=True, start_now=True):
+            recorded['prefer_systemd'] = prefer_systemd
+            recorded['start_now'] = start_now
+            return service_installer.InstallResult(
+                True, service_installer.METHOD_SYSTEMD, '/tmp/unit',
+                follow_up=['sudo loginctl enable-linger user'])
+
+        monkeypatch.setattr(service_installer, 'install', fake_install)
+        ok, message = AutostartManager().enable()
+
+        assert ok is True
+        # التفعيل من الإعدادات لا يبدأ الخدمة فوراً: المستخدم يضبط ثم يحفظ
+        assert recorded == {'prefer_systemd': True, 'start_now': False}
+        assert 'linger' in message
+
+    def test_enable_reports_failure_honestly(self, isolated_xdg_config, monkeypatch):
+        """الفشل يُنقل بسببه، لا يُبلَع فيظنّ المستخدم أنه نجح"""
         monkeypatch.setattr(
-            mgr, 'main_script',
-            __import__('pathlib').Path('/mnt/sda2/مشروع عربي/main.py'))
+            service_installer, 'install',
+            lambda **kwargs: service_installer.InstallResult(
+                False, service_installer.METHOD_SYSTEMD,
+                error='تعذّرت كتابة ملف الوحدة'))
+        ok, message = AutostartManager().enable()
+        assert ok is False
+        assert 'الوحدة' in message
 
-        home = isolated_data_dir / 'home'
-        autostart = home / '.config' / 'autostart'
-        autostart.mkdir(parents=True)
+    def test_disable_removes_every_method(self, isolated_xdg_config, monkeypatch):
+        """الإلغاء يُزيل كل صور التشغيل الدائم لا واحدة منها"""
+        called = []
+        monkeypatch.setattr(
+            service_installer, 'uninstall',
+            lambda: (called.append(True) or
+                     service_installer.InstallResult(True,
+                                                     service_installer.METHOD_NONE)))
+        ok, _ = AutostartManager().disable()
+        assert ok is True and called == [True]
 
-        import default_settings  # noqa: F401 - تأكيد استيراد سليم
-        real_home = __import__('pathlib').Path.home
-        monkeypatch.setattr(__import__('pathlib').Path, 'home',
-                            staticmethod(lambda: home))
-
-        ok, msg = mgr._enable_linux()
-        assert ok is True, msg
-
-        desktop_file = autostart / 'batteryguard.desktop'
-        content = desktop_file.read_text(encoding='utf-8')
-        exec_line = [l for l in content.splitlines() if l.startswith('Exec=')][0]
-        # المسارات المقتبسة
-        assert '"--background"' not in exec_line
-        assert exec_line.count('"') >= 4  # اقتباس بايثون + السكربت
-        assert '--background' in exec_line
-        assert 'X-GNOME-Autostart-enabled=true' in content
-
-    def test_is_enabled_respects_disabled_flag(self, isolated_data_dir, monkeypatch):
-        if not __import__('sys').platform.startswith('linux'):
-            pytest.skip('لينكس فقط')
-
-        home = isolated_data_dir / 'home'
-        autostart = home / '.config' / 'autostart'
-        autostart.mkdir(parents=True)
-        monkeypatch.setattr(__import__('pathlib').Path, 'home',
-                            staticmethod(lambda: home))
-
+    def test_is_enabled_reads_real_state(self, isolated_xdg_config, monkeypatch):
+        """`is_enabled` يقرأ الحالة الفعلية من المثبّت"""
         mgr = AutostartManager()
 
-        # لا يوجد ملف
+        monkeypatch.setattr(service_installer, 'status',
+                            lambda: service_installer.ServiceStatus())
         assert mgr.is_enabled() is False
 
-        # ملف مفعل
-        desktop_file = autostart / 'batteryguard.desktop'
-        desktop_file.write_text('[Desktop Entry]\nX-GNOME-Autostart-enabled=true\n',
-                                encoding='utf-8')
+        monkeypatch.setattr(
+            service_installer, 'status',
+            lambda: service_installer.ServiceStatus(
+                method=service_installer.METHOD_SYSTEMD,
+                installed=True, enabled=True))
         assert mgr.is_enabled() is True
+        assert mgr.active_method() == service_installer.METHOD_SYSTEMD
 
-        # ملف معطل داخلياً
-        desktop_file.write_text('[Desktop Entry]\nX-GNOME-Autostart-enabled=false\n',
-                                encoding='utf-8')
+        # مثبّت لكن غير مفعّل: ليس تشغيلاً تلقائياً
+        monkeypatch.setattr(
+            service_installer, 'status',
+            lambda: service_installer.ServiceStatus(
+                method=service_installer.METHOD_SYSTEMD,
+                installed=True, enabled=False))
         assert mgr.is_enabled() is False
+
+    def test_is_enabled_survives_installer_error(self, isolated_xdg_config,
+                                                 monkeypatch):
+        """خطأ في قراءة الحالة لا ينهار به مربّع اختيار في الإعدادات"""
+        def boom():
+            raise OSError('لا مدير مستخدم')
+
+        monkeypatch.setattr(service_installer, 'status', boom)
+        assert AutostartManager().is_enabled() is False
+        assert AutostartManager().active_method() == 'none'
 
 
 @pytest.mark.gui
@@ -74,12 +101,21 @@ class TestAppSmoke:
     """اختبار دخان: إنشاء النافذة الرئيسية كاملة وتنظيفها"""
 
     def test_modern_ui_lifecycle(self, qapp, isolated_data_dir, clean_qsettings):
+        from i18n import t
         from main_window import ModernUI
         window = ModernUI()
         try:
-            assert window.tabs.count() == 4  # الحالة/الإعدادات/AI/الإحصائيات
+            # خمسة مجالات مستقلة: الحالة، التحكم، التحليل، السجل، الإعدادات
+            expected = [t('tab.status'), t('tab.control'), t('tab.intelligence'),
+                        t('diag.title'), t('tab.record'), t('tab.settings')]
+            assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == expected
             assert window.monitor_thread is not None
             assert window.ai is not None
+            # كل مجال يجب أن يكون قد أنشأ عناصره الأساسية
+            assert window.state_plate is not None
+            assert window.charge_window_jaw is not None
+            assert window.capability_strip is not None
+            assert window.diagnostics_panel is not None
         finally:
             window.ai_timer.stop()
             window.auto_save_timer.stop()

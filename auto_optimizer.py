@@ -273,20 +273,19 @@ class AutoOptimizer:
             battery_percent = self.system_status.get('battery_percent', 50)
             is_charging = self.system_status.get('is_charging', False)
             
-            # الحصول على توصيات الذكاء الاصطناعي
+            # الأولوية من الشدّة المهيكلة، لا من نص الرسالة
+            if hasattr(self.ai_engine, 'get_advice'):
+                advice = self.ai_engine.get_advice(
+                    {'percent': battery_percent, 'is_charging': is_charging,
+                     'reporting': True})
+                weights = {'critical': 2, 'warning': 1}
+                return min(3, sum(weights.get(item.severity, 0) for item in advice))
+
+            # مسار احتياطي: عدد توصيات التحسين المتاحة
             recommendations = self.ai_engine.get_optimization_recommendations(
                 battery_percent, is_charging
             )
-            
-            # تحليل التوصيات لتحديد الأولوية
-            priority = 0
-            for rec in recommendations:
-                if '🚨' in rec or 'عاجل' in rec:
-                    priority += 2
-                elif '⚠️' in rec or 'مهم' in rec:
-                    priority += 1
-            
-            return min(3, priority)
+            return min(3, len(recommendations))
             
         except Exception as e:
             logger.error(f"خطأ في الحصول على أولوية الذكاء الاصطناعي: {e}")
@@ -358,7 +357,7 @@ class AutoOptimizer:
                 if len(self.optimization_history) > 100:
                     self.optimization_history = self.optimization_history[-100:]
                 
-                logger.info(f"✅ التحسين ناجح - توفير: {power_saved:.1f}% طاقة")
+                logger.info(f"التحسين ناجح - توفير: {power_saved:.1f}% طاقة")
                 
                 # إعادة قياس صحة النظام
                 time.sleep(2)
@@ -368,7 +367,7 @@ class AutoOptimizer:
                 # حفظ الإعدادات
                 self._save_settings()
             else:
-                logger.error(f"❌ فشل التحسين: {results.get('errors', [])}")
+                logger.error(f"فشل التحسين: {results.get('errors', [])}")
             
         except Exception as e:
             logger.error(f"خطأ في تنفيذ التحسين: {e}")
