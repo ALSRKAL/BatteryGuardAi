@@ -74,27 +74,62 @@ a = Analysis(
         'platform',
         'plyer',
         'plyer.platforms.win.notification',
+        # ═══════════════════════════════════════════════════
         # وحدات التطبيق
+        #
+        # القائمة كاملة عن قصد. PyInstaller يتتبّع الاستيراد الساكن، لكن
+        # `service_runner` يستورد `main_window` داخل دالة (ليبقى وضع الخلفية
+        # بلا تحميل الواجهة)، و`autostart_manager` يستورد `service_installer`
+        # داخل دوالّه. الاستيراد المؤجّل هو ما يفوت التتبّع الساكن، وأثره
+        # نسخة مبنيّة تعمل حتى أول نقرة إظهار ثم تفشل.
+        # ═══════════════════════════════════════════════════
+
+        # الأساس والتخزين والترجمة
         'storage',
-        'battery_ai',
+        'resource_path',
+        'default_settings',
+        'settings_bridge',
+        'i18n',
+
+        # القياس والعتاد
+        'battery_monitor',
+        'hardware_capability',
+        'battery_science',
+        'diagnostics',
         'monitor_thread',
         'charge_controller',
         'charge_control_advanced',
+
+        # الذكاء والحارس
+        'battery_ai',
+        'power_attribution',
+        'battery_intelligence',
+        'guard_actions',
+        'guard_service',
+
+        # التحسين
         'battery_optimizer',
         'battery_optimizer_ai',
         'auto_optimizer',
-        'permission_manager',
-        'interactive_notification_dialog',
-        'actionable_notification_dialog',
-        'welcome_dialog',
-        'default_settings',
-        'resource_path',
-        'notification_manager',
-        'battery_monitor',
-        'tray_icon',
+
+        # التشغيل ودورة الحياة
+        'service_runner',
+        'service_installer',
+        'lifecycle',
         'single_instance',
         'autostart_manager',
+        'permission_manager',
+
+        # الواجهة
         'main_window',
+        'ui_components',
+        'panel_widgets',
+        'theme',
+        'icons',
+        'tray_icon',
+        'notification_manager',
+        'interactive_notification_dialog',
+        'welcome_dialog',
     ],
     hookspath=[],
     hooksconfig={},
