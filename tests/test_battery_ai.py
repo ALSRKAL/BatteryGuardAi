@@ -323,3 +323,153 @@ class TestHardwareHealthBlend:
         score_after = ai.learning_data.get('health_score')
         # صحة العتاد المنخفضة تسحب الدرجة نحو الأسفل
         assert score_after <= score_before
+
+
+class TestWorkCadence:
+    """
+    وتيرة العمل الثقيل. هذه الاختبارات تحرس خطأً حقيقياً كان يجعل التطبيق
+    يعمل بلا مشكلة أول ساعة ثم يحرق المعالج ويكتب على القرص كل ثانيتين.
+    """
+
+    @staticmethod
+    def _sample(percent=70, charging=False, power=9.0):
+        return {'percent': percent, 'is_charging': charging,
+                'power_draw': power, 'voltage': 11.5, 'current': 0.8}
+
+    def test_cadence_survives_full_history(self, isolated_data_dir):
+        """
+        بعد امتلاء السجل يبقى `len(usage_history)` ثابتاً عند `HISTORY_LIMIT`.
+        وبما أن 2000 يقبل القسمة على وتيرة التحليل والحفظ، كانت **كل** عيّنة
+        تُطلق تحليلاً عميقاً وكتابة كاملة. المرجع الآن عدّاد تصاعدي.
+        """
+        from battery_ai import DEEP_ANALYSIS_EVERY
+
+        ai = BatteryAI()
+        deep_calls = []
+        ai._perform_deep_analysis = lambda: deep_calls.append(1)
+
+        # املأ السجل حتى الحدّ
+        for _ in range(HISTORY_LIMIT + 5):
+            ai.usage_history.append({
+                'timestamp': datetime.now().isoformat(), 'battery_percent': 70,
+                'is_charging': False, 'power_draw': 9.0, 'voltage': 11.5,
+                'current': 0.8, 'hour': 12, 'day_of_week': 1, 'is_weekend': False})
+        del ai.usage_history[:len(ai.usage_history) - HISTORY_LIMIT]
+        assert len(ai.usage_history) == HISTORY_LIMIT
+
+        ai._sample_count = 0
+        deep_calls.clear()
+        for _ in range(60):
+            ai.analyze_usage_pattern(self._sample())
+
+        # طول السجل ثابت عند الحدّ، فلو كان هو المرجع لأُطلق التحليل 60 مرة
+        assert len(ai.usage_history) == HISTORY_LIMIT
+        assert len(deep_calls) == 0, (
+            f'أُطلق التحليل العميق {len(deep_calls)} مرة في 60 عيّنة '
+            f'(الوتيرة كل {DEEP_ANALYSIS_EVERY})')
+
+    def test_deep_analysis_runs_on_counter_boundary(self, isolated_data_dir):
+        from battery_ai import DEEP_ANALYSIS_EVERY
+
+        ai = BatteryAI()
+        deep_calls = []
+        ai._perform_deep_analysis = lambda: deep_calls.append(1)
+        ai.usage_history = [{
+            'timestamp': datetime.now().isoformat(), 'battery_percent': 70,
+            'is_charging': False, 'power_draw': 9.0, 'voltage': 11.5,
+            'current': 0.8, 'hour': 12, 'day_of_week': 1,
+            'is_weekend': False}] * 100
+        ai._sample_count = DEEP_ANALYSIS_EVERY - 1
+
+        ai.analyze_usage_pattern(self._sample())
+        assert len(deep_calls) == 1, 'لم يُطلق التحليل عند حدّ العدّاد'
+
+    def test_counter_persists_across_restart(self, isolated_data_dir):
+        """العدّاد يُحفظ: بلا ذلك تعود الوتيرة إلى الصفر كل تشغيل"""
+        ai = BatteryAI()
+        for _ in range(15):
+            ai.analyze_usage_pattern(self._sample())
+        assert ai._sample_count == 15
+        ai.save_learning_data(force=True)
+
+        restored = BatteryAI()
+        assert restored._sample_count == 15
+
+    def test_disk_writes_are_rate_limited(self, isolated_data_dir):
+        """
+        ترميز السجل الممتلئ يكلّف نحو 840 مللي ثانية ويكتب مئات الكيلوبايتات.
+        الكتابة المتكررة تحرق معالجاً وتوقظ القرص، وهو نفس السلوك الذي يحذّر
+        التطبيق المستخدم منه.
+        """
+        ai = BatteryAI()
+        writes = []
+        real_save = ai.store.save
+        ai.store.save = lambda: (writes.append(1), real_save())[1]
+
+        assert ai.save_learning_data() is True, 'أول حفظ يجب أن يمرّ'
+        assert len(writes) == 1
+
+        for _ in range(20):
+            assert ai.save_learning_data() is False
+        assert len(writes) == 1, f'كُتب {len(writes)} مرة بدل مرة واحدة'
+        assert ai._save_pending is True, 'يجب تسجيل أن هناك تغييراً غير محفوظ'
+
+    def test_force_bypasses_rate_limit(self, isolated_data_dir):
+        """
+        مسار الإغلاق يجب أن يكتب دائماً: مهلة التقليل لا يجوز أن تُفقد
+        المستخدم ساعة من التعلّم عند إطفاء الجهاز.
+        """
+        ai = BatteryAI()
+        writes = []
+        real_save = ai.store.save
+        ai.store.save = lambda: (writes.append(1), real_save())[1]
+
+        ai.save_learning_data()
+        assert ai.save_learning_data() is False
+        assert ai.save_learning_data(force=True) is True
+        assert len(writes) == 2
+        assert ai._save_pending is False
+
+    def test_reset_writes_immediately(self, isolated_data_dir):
+        """المستخدم طلب المسح ويتوقّع أثره الآن لا بعد خمس دقائق"""
+        ai = BatteryAI()
+        ai.save_learning_data(force=True)
+        for _ in range(10):
+            ai.analyze_usage_pattern(self._sample())
+
+        ai.reset()
+        assert ai._sample_count == 0
+        assert ai.usage_history == []
+
+        restored = BatteryAI()
+        assert restored.usage_history == []
+        assert restored._sample_count == 0
+
+    def test_cost_per_ten_minutes_stays_low(self, isolated_data_dir):
+        """
+        حرس على الأداء نفسه: عشر دقائق من الحلقة (300 عيّنة) على سجل ممتلئ.
+        القياس قبل الإصلاح كان 47 ثانية معالج؛ الحدّ هنا سخيّ جداً ومع ذلك
+        يكشف أي عودة إلى العمل الثقيل في كل عيّنة.
+        """
+        import time as time_module
+
+        ai = BatteryAI()
+        seed = {'timestamp': datetime.now().isoformat(), 'battery_percent': 70,
+                'is_charging': False, 'power_draw': 9.0, 'voltage': 11.5,
+                'current': 0.8, 'hour': 12, 'day_of_week': 1,
+                'is_weekend': False}
+        ai.usage_history = [dict(seed) for _ in range(HISTORY_LIMIT)]
+        ai._last_save_time = time_module.monotonic()
+
+        writes = []
+        real_save = ai.store.save
+        ai.store.save = lambda: (writes.append(1), real_save())[1]
+
+        started = time_module.perf_counter()
+        for _ in range(300):
+            ai.analyze_usage_pattern(self._sample())
+        elapsed = time_module.perf_counter() - started
+
+        assert elapsed < 5.0, (
+            f'{elapsed:.1f}s معالج لعشر دقائق تشغيل - عودة إلى العمل الثقيل')
+        assert len(writes) == 0, f'{len(writes)} كتابة على القرص خلال المهلة'

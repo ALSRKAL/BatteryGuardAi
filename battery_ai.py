@@ -15,10 +15,13 @@ import logging
 import math
 import statistics
 import threading
+import time
 from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
+from battery_intelligence import (ANOMALY_WINDOW, ROBUST_Z_THRESHOLD,
+                                  robust_z_score)
 from battery_science import (Advice, BatterySnapshot, build_advice,
                              days_to_end_of_life, equivalent_full_cycles,
                              projected_annual_loss)
@@ -29,6 +32,36 @@ logger = logging.getLogger('BatteryGuard')
 
 # سقف موحد لسجل الاستخدام في الذاكرة وعلى القرص
 HISTORY_LIMIT = 2000
+
+# ─────────────────────────────────────────────────────────────
+# وتيرة العمل الثقيل
+#
+# قياس فعلي على سجل ممتلئ (2000 نقطة) على جهاز حقيقي:
+#   save_learning_data()      ≈ 840 مللي ثانية  (كلها ترميز JSON للسجل)
+#   _perform_deep_analysis()  ≈ 140 مللي ثانية  بلا الحفظ
+#
+# الوتيرة السابقة كانت: تحليل عميق كل 30 عيّنة وحفظ كل 50، أي عند عيّنة كل
+# ثانيتين: تحليل كل دقيقة وحفظ كل 100 ثانية. النتيجة نحو 1.5 ثانية معالج في
+# كل دقيقة، وكتابة نحو 200 كيلوبايت على القرص كل دقيقة.
+#
+# هذا نقيض غرض التطبيق مرتين: يحرق معالجاً، ويوقظ القرص باستمرار — وهو نفس
+# سلوك `disk_thrash` الذي يحذّر منه المستخدم. الأنماط السلوكية تتغيّر على مدى
+# ساعات لا ثوانٍ، فالتحليل كل عشر دقائق يعطي نفس النتيجة بجزء من الكلفة.
+#
+# الحفظ الأقل تكراراً صار آمناً لأن الإغلاق النظيف (lifecycle.py) يضمن حفظاً
+# قسرياً عند SIGTERM وتسجيل الخروج وإعادة التشغيل، فلا تُفقد ساعة من التعلّم
+# عند إغلاق الجهاز.
+# ─────────────────────────────────────────────────────────────
+
+#: كل كم عيّنة يجري التحليل العميق (عيّنة كل ثانيتين ⇒ نحو عشر دقائق)
+DEEP_ANALYSIS_EVERY = 300
+
+#: كل كم عيّنة تُحدَّث بصمة السلوك (عملية رخيصة على آخر 20 عيّنة)
+FINGERPRINT_EVERY = 60
+
+#: أقصر مدة بين كتابتين فعليتين على القرص (ثانية).
+#: حرس زمني فوق العدّادات: أي مسار يطلب الحفظ بتكرار أعلى لا يصل إلى القرص.
+MIN_SAVE_INTERVAL = 300.0
 
 # أطول فجوة بين عينتين تُحسب كزمن متصل (دقائق). ما بعدها = نوم/إيقاف.
 MAX_SAMPLE_GAP_MIN = 15
@@ -72,6 +105,20 @@ class BatteryAI:
 
         # صحة العتاد الحقيقية (من sysfs/WMI) إن توفرت
         self._hardware_health: Optional[int] = None
+
+        # حرس الكتابة على القرص: آخر حفظ فعلي، وهل بقي تغيير غير محفوظ
+        self._last_save_time = 0.0
+        self._save_pending = False
+
+        # عدّاد عيّنات تصاعدي لا يتوقّف.
+        #
+        # لا يجوز استخدام `len(usage_history)` لتحديد وتيرة العمل الثقيل: السجل
+        # مقصوص عند `HISTORY_LIMIT`، فبعد امتلائه يبقى طوله ثابتاً عند 2000
+        # إلى الأبد. وبما أن 2000 يقبل القسمة على 30 و50 و60، فإن **كل** عيّنة
+        # بعد الامتلاء كانت تُطلق تحليلاً عميقاً وكتابة كاملة على القرص. أي أن
+        # التطبيق كان يعمل بلا مشكلة أول ساعة ثم يبدأ حرق المعالج والكتابة كل
+        # ثانيتين بلا سبب ظاهر. القياس: 7.9٪ من نواة و300 كتابة لكل عشر دقائق.
+        self._sample_count = int(self.learning_data.get('sample_count', 0))
 
         # حقول يقرؤها الواجهة مباشرة
         self.learning_progress = int(self.learning_data.get('learning_progress', 0))
@@ -121,21 +168,43 @@ class BatteryAI:
             'ai_confidence_level': 0,
             'personalization_level': 0,
             'optimization_history': [],
+            #: عدّاد العيّنات التصاعدي؛ يحكم وتيرة العمل الثقيل عبر الجلسات
+            'sample_count': 0,
             'last_updated': None,
         }
 
-    def save_learning_data(self):
-        """حفظ بيانات التعلم (كتابة ذرية آمنة بين الخيوط)"""
+    def save_learning_data(self, force: bool = False) -> bool:
+        """
+        حفظ بيانات التعلم (كتابة ذرية آمنة بين الخيوط).
+
+        ترميز السجل الممتلئ إلى JSON يكلّف نحو 840 مللي ثانية ويكتب مئات
+        الكيلوبايتات، فالكتابة محدودة بـ `MIN_SAVE_INTERVAL`. أي نداء أسرع من
+        ذلك يُهمل بصمت ويُعاد `False`، إلا أن يكون `force=True`.
+
+        `force=True` تُستخدم في مسار الإغلاق وعند إعادة التعيين: هناك الحفظ
+        واجب لا اختياري، ولا يجوز أن يمنعه مؤقّت.
+        """
+        now = time.monotonic()
         with self._lock:
+            if not force and (now - self._last_save_time) < MIN_SAVE_INTERVAL:
+                self._save_pending = True
+                return False
+
             self.learning_data['usage_history'] = self.usage_history[-HISTORY_LIMIT:]
             self.learning_data['last_updated'] = datetime.now().isoformat()
             self.learning_data['prediction_accuracy_history'] = self.prediction_accuracy[-50:]
             self.learning_data['learning_progress'] = self.learning_progress
             self.learning_data['ai_maturity_level'] = self.ai_maturity_level
             self.learning_data['personalization_level'] = self.personalization_score
-            snapshot = dict(self.learning_data)
+            self.learning_data['sample_count'] = self._sample_count
+            points = len(self.learning_data['usage_history'])
+            self._last_save_time = now
+            self._save_pending = False
+
         if self.store.save():
-            logger.debug(f"تم حفظ بيانات AI ({len(snapshot.get('usage_history', []))} نقطة)")
+            logger.debug(f"تم حفظ بيانات AI ({points} نقطة)")
+            return True
+        return False
 
     def reset(self):
         """
@@ -158,7 +227,10 @@ class BatteryAI:
             self.personalization_score = 0
             self.learning_data.clear()
             self.learning_data.update(defaults)
-        self.save_learning_data()
+            self._last_save_time = 0.0
+            self._sample_count = 0
+        # إعادة التعيين تُكتب فوراً: المستخدم طلب المسح ويتوقّع أثره الآن
+        self.save_learning_data(force=True)
         logger.info("تمت إعادة تعيين بيانات الذكاء الاصطناعي")
 
     # ──────────────────────────────────────────────────────────────
@@ -192,18 +264,23 @@ class BatteryAI:
 
             self._detect_instant_anomalies(entry)
 
+            # العدّاد التصاعدي هو مرجع الوتيرة، لا طول السجل المقصوص
+            self._sample_count += 1
+            counter = self._sample_count
             n = len(self.usage_history)
-            deep_due = (n % 30 == 0)
-            save_due = (n % 50 == 0)
+            deep_due = (counter % DEEP_ANALYSIS_EVERY == 0)
+            fingerprint_due = (counter % FINGERPRINT_EVERY == 0)
 
         if deep_due and n >= 50:
             self._perform_deep_analysis()
-        elif n % 10 == 0:
+        elif fingerprint_due:
             with self._lock:
                 self.learning_data['learning_iterations'] += 1
                 self._update_behavior_fingerprint(self.usage_history[-20:])
 
-        if save_due or deep_due:
+        # الحفظ يقرّر بنفسه: `MIN_SAVE_INTERVAL` هو الحاكم، لا عدّاد العيّنات.
+        # المحاولة رخيصة (مقارنة زمن) والكتابة وحدها هي المكلفة.
+        if deep_due or fingerprint_due:
             self.save_learning_data()
 
     def _update_ewma_rates(self, entry: Dict):
@@ -403,6 +480,7 @@ class BatteryAI:
             self._update_weekly_patterns()
             self._calculate_learning_progress()
             self.last_analysis_time = datetime.now()
+        # الحفظ محدود بمهلته: التحليل العميق لا يفرض كتابة على القرص
         self.save_learning_data()
         logger.info("اكتمل التحليل العميق الدوري للبيانات")
 
@@ -710,23 +788,38 @@ class BatteryAI:
             self.learning_data['weekday_usage_pattern'] = statistics.mean(weekday_levels)
 
     def _detect_instant_anomalies(self, current_entry: Dict):
-        """كشف الاستهلاك غير الطبيعي فورياً"""
-        if len(self.usage_history) < 10:
+        """
+        كشف الاستهلاك غير الطبيعي بدرجة z متينة (وسيط + انحراف مطلق وسيطي).
+
+        الطريقة السابقة كانت «أكبر من ضعف متوسط آخر عشر قراءات»، وفيها عيبان
+        جوهريان: القراءة الشاذة نفسها تدخل في المتوسط فترفعه وتُسكِت الكشف
+        بعدها، والعتبة الثابتة 10 واط تعني أن جهازاً منخفض الاستهلاك لا يُكتشف
+        فيه شذوذ أبداً. الوسيط لا تفسده القيم الشاذة، والحدّ نسبي لا مطلق.
+        """
+        current_power = float(current_entry.get('power_draw', 0) or 0)
+        if current_power <= 0:
             return
-        recent = self.usage_history[-10:]
-        powers = [e.get('power_draw', 0) for e in recent if e.get('power_draw', 0) > 0]
-        if not powers:
+
+        # نافذة أطول من عشر قراءات: الوسيط يحتاج بيانات ليكون خط أساس
+        window = [float(e.get('power_draw', 0) or 0)
+                  for e in self.usage_history[-ANOMALY_WINDOW - 1:-1]
+                  if float(e.get('power_draw', 0) or 0) > 0]
+        score = robust_z_score(current_power, window)
+        if score is None or score < ROBUST_Z_THRESHOLD:
             return
-        avg_power = statistics.mean(powers)
-        current_power = current_entry.get('power_draw', 0)
-        if current_power > avg_power * 2 and current_power > 10:
-            self.anomaly_detector.add_anomaly({
-                'type': 'high_power_consumption',
-                'timestamp': current_entry['timestamp'],
-                'value': current_power,
-                'average': avg_power,
-                'message': f"استهلاك طاقة مرتفع: {current_power:.1f}W (المتوسط: {avg_power:.1f}W)",
-            })
+
+        baseline = statistics.median(window)
+        self.anomaly_detector.add_anomaly({
+            'type': 'high_power_consumption',
+            'timestamp': current_entry['timestamp'],
+            'value': round(current_power, 2),
+            'average': round(baseline, 2),
+            'z_score': round(score, 2),
+            'severity': 'critical' if score >= ROBUST_Z_THRESHOLD * 2 else 'warning',
+            'key': 'anomaly.high_power',
+            'params': {'value': round(current_power, 1),
+                       'baseline': round(baseline, 1)},
+        })
 
     def _update_behavior_fingerprint(self, recent_data: List[Dict]):
         """تحديث بصمة سلوك المستخدم"""
