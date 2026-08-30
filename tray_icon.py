@@ -10,10 +10,11 @@
 
 import logging
 import sys
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import QRect, Qt
-from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtCore import QRect, Qt, QTimer
+from PyQt6.QtGui import (QAction, QColor, QFont, QIcon, QPainter, QPen,
+                         QPixmap)
 from PyQt6.QtWidgets import QMenu, QSystemTrayIcon
 
 import icons as icon_set
@@ -32,6 +33,14 @@ ICON_SIZE = 128
 #: أقصى عدد أيقونات مخزّنة قبل التفريغ
 ICON_CACHE_LIMIT = 60
 
+#: محاولات إظهار الأيقونة قبل الاستسلام، وتباعدها بالمللي ثانية
+TRAY_RETRY_LIMIT = 12
+TRAY_RETRY_BASE_MS = 1500
+TRAY_RETRY_MAX_MS = 10000
+
+#: أقصى عدد مخالفين يُعرضون في القائمة
+MENU_OFFENDER_LIMIT = 4
+
 
 class BatteryTrayIcon:
     """أيقونة الصينية وقائمتها"""
@@ -45,17 +54,57 @@ class BatteryTrayIcon:
         self.reporting = True
 
         self._icon_cache: Dict[Tuple[int, bool, bool], QIcon] = {}
+        self._offender_actions: List[QAction] = []
+        self._show_attempts = 0
 
         self.create_menu()
         self.update_icon(0, False)
         self.tray_icon.activated.connect(self.on_activated)
+        self._ensure_visible()
+
+    # ── الظهور ──────────────────────────────────────────────
+
+    def _ensure_visible(self):
+        """
+        إظهار الأيقونة، وإعادة المحاولة إن لم تكن صينية النظام جاهزة بعد.
+
+        هذا ليس احتياطاً نظرياً: في وضع التشغيل التلقائي يبدأ التطبيق مع
+        الجلسة قبل أن يُسجّل مضيف الصينية نفسه على ناقل الرسائل، فتُهمل
+        الأيقونة صامتةً ويظنّ المستخدم أن التطبيق لم يعمل. نعيد المحاولة
+        بتباعد متزايد حتى تتوفر الصينية أو تنتهي المحاولات.
+        """
         self.tray_icon.show()
+        if self.tray_icon.isVisible():
+            if self._show_attempts:
+                logger.info(f"ظهرت أيقونة الصينية بعد {self._show_attempts} محاولة")
+            return
+
+        self._show_attempts += 1
+        if self._show_attempts > TRAY_RETRY_LIMIT:
+            logger.warning(
+                "صينية النظام غير متاحة - التطبيق يعمل في الخلفية بلا أيقونة. "
+                "على بيئات GNOME الحديثة تحتاج إضافة AppIndicator.")
+            return
+        delay = min(TRAY_RETRY_MAX_MS, TRAY_RETRY_BASE_MS * self._show_attempts)
+        logger.debug(f"صينية النظام غير جاهزة - إعادة المحاولة بعد {delay}ms")
+        QTimer.singleShot(delay, self._ensure_visible)
+
+    @property
+    def available(self) -> bool:
+        """هل الأيقونة ظاهرة فعلاً في الصينية"""
+        return bool(self.tray_icon.isVisible())
 
     # ── القائمة ─────────────────────────────────────────────
 
     def create_menu(self):
-        """القائمة يُحتفظ بمرجعها حتى لا يجمعها جامع النفايات"""
-        self.menu = QMenu(self.parent)
+        """
+        القائمة يُحتفظ بمرجعها حتى لا يجمعها جامع النفايات.
+
+        تُبنى بلا أب عن قصد: في وضع الخلفية لا توجد نافذة، والمتحكّم كائن
+        `QObject` لا `QWidget`، و`QMenu` لا تقبل إلا أباً من نوع `QWidget`.
+        قائمة الصينية لا تحتاج أباً أصلاً لأنها تُعرض في سياق الصينية.
+        """
+        self.menu = QMenu()
         menu = self.menu
 
         show_action = menu.addAction(icon_set.icon('crosshair', 16, theme.INK),
@@ -71,6 +120,13 @@ class BatteryTrayIcon:
         self.time_action.setEnabled(False)
         menu.addSeparator()
 
+        # مجال المخالفين: أهمّ ما يريد المستخدم رؤيته بلا فتح النافذة
+        self.offenders_header = menu.addAction(t('guard.tray_header'))
+        self.offenders_header.setEnabled(False)
+        self.offenders_menu = menu.addMenu(t('guard.no_offenders'))
+        self.offenders_menu.setEnabled(False)
+        menu.addSeparator()
+
         optimize_action = menu.addAction(icon_set.icon('gauge', 16, theme.INK),
                                          t('action.optimize'))
         optimize_action.triggered.connect(self.parent.run_optimization)
@@ -81,6 +137,52 @@ class BatteryTrayIcon:
         quit_action.triggered.connect(self.parent.quit_application)
 
         self.tray_icon.setContextMenu(menu)
+
+    # ── المخالفون ───────────────────────────────────────────
+
+    def update_offenders(self, report) -> None:
+        """
+        بناء قائمة المخالفين مع إجراءاتها. تُعاد بناؤها كل تقرير لأن الأسماء
+        والأرقام تتغيّر، ويُحتفظ بمراجع الإجراءات حتى لا يجمعها جامع النفايات.
+        """
+        menu = getattr(self, 'offenders_menu', None)
+        if menu is None:
+            return
+        menu.clear()
+        self._offender_actions = []
+
+        offenders = [item for item in getattr(report, 'offenders', [])
+                     if item.recommended_action != 'none'][:MENU_OFFENDER_LIMIT]
+        if not offenders:
+            menu.setTitle(t('guard.no_offenders'))
+            menu.setEnabled(False)
+            return
+
+        menu.setTitle(t('guard.offenders_count', count=len(offenders)))
+        menu.setEnabled(True)
+        for offender in offenders:
+            watts = (f"{offender.watts:.1f}{t('unit.watt')}"
+                     if offender.watts else '—')
+            submenu = menu.addMenu(
+                t('guard.offender_line', name=offender.name, watts=watts,
+                  score=int(offender.damage_score),
+                  loss=round(offender.annual_capacity_loss, 2)))
+            self._add_offender_actions(submenu, offender.name)
+
+    def _add_offender_actions(self, submenu: QMenu, name: str) -> None:
+        """إجراءات مخالف واحد. الترتيب من الأخفّ إلى الأشدّ عن قصد."""
+        entries = (
+            ('guard.action.throttle', lambda: self.parent.guard_throttle(name)),
+            ('guard.action.restore', lambda: self.parent.guard_restore(name)),
+            ('guard.action.suspend', lambda: self.parent.guard_suspend(name)),
+            ('guard.action.resume', lambda: self.parent.guard_resume(name)),
+            ('guard.action.ignore', lambda: self.parent.guard_ignore(name)),
+            ('guard.action.terminate', lambda: self.parent.guard_terminate(name)),
+        )
+        for key, handler in entries:
+            action = submenu.addAction(t(key))
+            action.triggered.connect(handler)
+            self._offender_actions.append(action)
 
     # ── التحديث ─────────────────────────────────────────────
 
@@ -182,14 +284,29 @@ class BatteryTrayIcon:
     # ── التفاعل ─────────────────────────────────────────────
 
     def on_activated(self, reason):
-        """نقرة واحدة تُظهر أو تُخفي، ونقرة مزدوجة تُظهر دائماً"""
+        """
+        نقرة واحدة تُظهر أو تُخفي، ونقرة مزدوجة تُظهر دائماً.
+
+        `window_visible` بدل `isVisible` المباشرة: في وضع الخلفية لا توجد
+        نافذة بعد، والمتحكّم يقرّر بنفسه معنى «ظاهرة».
+        """
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            if self.parent.isVisible():
+            if self._window_visible():
                 self.parent.hide()
             else:
                 self.parent.show_window()
         elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.parent.show_window()
+
+    def _window_visible(self) -> bool:
+        """هل نافذة التطبيق ظاهرة الآن (نافذة كاملة أو متحكّم خلفية)"""
+        checker = getattr(self.parent, 'window_visible', None)
+        if callable(checker):
+            return bool(checker())
+        try:
+            return bool(self.parent.isVisible())
+        except (AttributeError, RuntimeError):
+            return False
 
     def show_message(self, title: str, message: str,
                      icon=QSystemTrayIcon.MessageIcon.Information):

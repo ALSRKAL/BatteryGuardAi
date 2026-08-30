@@ -42,6 +42,8 @@ battery_events.log
 battery_settings.json
 battery_ai_data.json
 auto_optimizer_settings.json
+# حالة نموذج الطاقة وسجل المستهلكين: بيانات تعلّم خاصة بجهاز المستخدم
+battery_guard_state.json
 
 # Test artifacts
 .pytest_cache/

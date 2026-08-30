@@ -52,6 +52,22 @@ def isolated_data_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def isolated_xdg_config(tmp_path, monkeypatch):
+    """
+    مجلد إعدادات XDG معزول.
+
+    `service_installer` يكتب وحدات systemd وملفات تشغيل تلقائي تحت
+    `XDG_CONFIG_HOME`. بلا هذا العزل تكتب الاختبارات في إعدادات المستخدم
+    الحقيقية وتُثبّت له خدمة لم يطلبها.
+    """
+    config = tmp_path / 'xdg-config'
+    (config / 'systemd' / 'user').mkdir(parents=True, exist_ok=True)
+    (config / 'autostart').mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(config))
+    yield config
+
+
+@pytest.fixture
 def clean_qsettings():
     """مسح إعدادات QSettings المعزولة قبل الاختبار"""
     from PyQt6.QtCore import QSettings
