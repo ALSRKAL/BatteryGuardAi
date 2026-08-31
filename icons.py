@@ -14,7 +14,7 @@
 """
 
 import logging
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Tuple
 
 from PyQt6.QtCore import QPointF, QRect, QRectF, Qt
 from PyQt6.QtGui import (QBrush, QColor, QIcon, QPainter, QPainterPath, QPen,

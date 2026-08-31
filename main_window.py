@@ -11,9 +11,10 @@ from typing import Dict, List, Optional, Tuple
 from PyQt6.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
-                             QMainWindow, QMessageBox, QPushButton, QTabWidget,
+                             QMainWindow, QPushButton, QTabWidget,
                              QTextEdit, QVBoxLayout, QWidget)
 
+import dialogs
 import diagnostics
 import icons
 import theme
@@ -35,8 +36,7 @@ from panel_widgets import ChargeWindowJaw, EngravedRail
 from permission_manager import PermissionManager
 from resource_path import get_data_path, get_resource_path
 from tray_icon import BatteryTrayIcon
-from ui_components import (AnalysisTab, ControlTab, DiagnosticsTab, RecordTab,
-                           SettingsTab, StatusTab)
+from ui_components import (ControlTab, DetailsTab, SettingsTab, StatusTab)
 
 logger = logging.getLogger('BatteryGuard')
 
@@ -76,7 +76,8 @@ class ModernUI(QMainWindow):
         self.ai = shared.get('ai') or BatteryAI()
         self.notification_manager = (shared.get('notification_manager')
                                      or SmartNotificationManager())
-        self.optimizer = BatteryOptimizer(ai_engine=self.ai)
+        # المحسّن يقرأ القدرة من نفس المقياس: بلا مصدر قياس لا يعلن توفيراً
+        self.optimizer = BatteryOptimizer(ai_engine=self.ai, monitor=self.monitor)
         self.auto_optimizer = AutoOptimizer(self.optimizer, self.ai)
 
         # خطّ الحارس: نسب الطاقة للعمليات، الاستدلال، والإجراءات الفعلية.
@@ -172,7 +173,10 @@ class ModernUI(QMainWindow):
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(theme.SPACE_4)
 
-        # ── مُحدِّد المجال: كل شيء داخل مجاله، ولا تكديس فوق التابات ──
+        # ── مُحدِّد المجال: أربعة مجالات لا ستة ──
+        # كانت ستة تبويبات، ثلاثة منها لا تُفتح إلا عند سؤال محدد. دُمجت في
+        # «التفاصيل» بأقسام تُفتح بالطلب. أسماء الخصائص القديمة تبقى مرادفات
+        # لنفس العنصر حتى لا تُكسر مسارات التنقّل التي تشير إليها.
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
 
@@ -182,14 +186,9 @@ class ModernUI(QMainWindow):
         self.status_tab = ControlTab.create(self)
         self.tabs.addTab(self.status_tab, t('tab.control'))
 
-        self.ai_tab = AnalysisTab.create(self)
-        self.tabs.addTab(self.ai_tab, t('tab.intelligence'))
-
-        self.diagnostics_tab = DiagnosticsTab.create(self)
-        self.tabs.addTab(self.diagnostics_tab, t('diag.title'))
-
-        self.stats_tab = RecordTab.create(self)
-        self.tabs.addTab(self.stats_tab, t('tab.record'))
+        self.details_tab = DetailsTab.create(self)
+        self.tabs.addTab(self.details_tab, t('tab.details'))
+        self.ai_tab = self.diagnostics_tab = self.stats_tab = self.details_tab
 
         self.settings_tab = SettingsTab.create(self)
         self.tabs.addTab(self.settings_tab, t('tab.settings'))
@@ -402,10 +401,22 @@ class ModernUI(QMainWindow):
             self.remediation_plate.setVisible(bool(self.monitor.capability.remediation))
 
     def show_diagnostics(self) -> None:
-        """الانتقال إلى مجال التشخيص، وتشغيل فحص إن لم يوجد تقرير بعد"""
-        self.tabs.setCurrentWidget(self.diagnostics_tab)
+        """فتح قسم التشخيص، وتشغيل فحص إن لم يوجد تقرير بعد"""
+        self._open_details_section('diagnostics')
         if self._diagnostics_report is None:
             self.run_diagnostics()
+
+    def _open_details_section(self, key: str) -> None:
+        """
+        الانتقال إلى مجال التفاصيل وفتح القسم المطلوب.
+
+        الانتقال بلا فتح القسم يترك المستخدم أمام عناوين مطويّة ويحسب أن
+        الزر لم يعمل: التنقّل يجب أن ينتهي عند ما طُلب لا عند صفحته.
+        """
+        self.tabs.setCurrentWidget(self.details_tab)
+        section = (getattr(self, 'details_sections', None) or {}).get(key)
+        if section is not None:
+            section.set_expanded(True)
 
     def run_diagnostics(self) -> None:
         """
@@ -516,7 +527,7 @@ class ModernUI(QMainWindow):
         elif action == 'open_capability':
             self.show_remediation()
         elif action == 'open_health':
-            self.tabs.setCurrentWidget(self.stats_tab)
+            self._open_details_section('record')
         else:
             # إجراءات يدوية (وصل/فصل/تبريد): نكتفي بتسجيل النصيحة
             self.status_label.setText(t(f'action.{action}'))
@@ -571,9 +582,9 @@ class ModernUI(QMainWindow):
         minutes = int((uptime.total_seconds() % 3600) // 60)
         
         if hours > 0:
-            self.uptime_label.setText(f"وقت التشغيل: {hours}س {minutes}د")
+            self.uptime_label.setText(t('record.uptime', hours=hours, minutes=minutes))
         else:
-            self.uptime_label.setText(f"وقت التشغيل: {minutes}د")
+            self.uptime_label.setText(t('record.uptime_short', minutes=minutes))
     
     def force_initial_update(self):
         """تحديث فوري عند البدء"""
@@ -623,31 +634,17 @@ class ModernUI(QMainWindow):
             ])
             self._trace_sample(percent)
 
-        # ── القياسات في مجال التحكم ──
+        # ── الوقت المتبقي: القراءة الوحيدة التي لا تعرضها لوحة الحالة ──
+        # حُذف من هنا تنسيق `power_draw_label` و`health_label` و
+        # `cycle_count_label` و`temperature_label` و`charging_status`: لم تعد
+        # لها عناصر بعد حذف الكتلة المكرّرة من مجال التحكم، وكان كل تنسيق
+        # يُحسب في كل نبضة ثم يُرمى.
         time_text = self._format_time_left(battery_status, percent, is_charging)
         self._set_measure('time_remaining_label', time_text)
         self.tray.update_time_remaining(time_text)
 
-        self._set_measure(
-            'power_draw_label',
-            f"{battery_status.get('power_draw', 0):.1f} {t('unit.watt')}"
-            if (battery_status.get('power_draw') or 0) > 0.1 else '—')
-
-        self._set_measure('health_label',
-                          f"{soh:.0f} {t('unit.percent')}" if soh is not None
-                          else t('health.unknown'))
-
         cycles = health.get('cycle_count')
-        cycles_text = f"{cycles} {t('unit.cycles')}" if cycles else t('health.cycles_unavailable')
-        self._set_measure('cycle_count_label', cycles_text)
         self._set_measure('cycle_count_stats_label', str(cycles) if cycles else '—')
-
-        temperature = battery_status.get('temperature')
-        self._set_measure('temperature_label',
-                          f"{temperature:.1f} {t('unit.celsius')}" if temperature is not None
-                          else t('status.temperature_unavailable'))
-
-        self._set_measure('charging_status', t(battery_status.get('status_key', 'status.reading')))
 
         # ── الصحة في مجال السجل ──
         if hasattr(self, 'health_progress'):
@@ -705,19 +702,16 @@ class ModernUI(QMainWindow):
         """كتابة نص وصفي في تسمية إن وُجدت"""
         self._set_measure(attr, text, color)
 
-    def send_notification(self, title: str, message: str, urgency: str):
-        """إرسال إشعار ذكي"""
+    def send_notification(self, title: str, message: str, urgency: str,
+                          notification_type: str = 'general'):
+        """
+        إرسال إشعار.
+
+        كان النوع يُستنتج بمطابقة كلمات عربية داخل نص مترجم أصلاً: على واجهة
+        إنجليزية تفشل كل المطابقات فيصير كل شيء `general`، فتضيع فترة التهدئة
+        الخاصة بكل نوع ويضيع صوته. النوع الآن معامل صريح يمرّره المُنادي.
+        """
         if self.enable_notifications.isChecked():
-            # تحديد نوع الإشعار
-            notification_type = 'general'
-            if 'منخفضة' in message or 'منخفض' in message:
-                notification_type = 'battery_low'
-            elif 'ممتلئة' in message or 'مشحونة' in message:
-                notification_type = 'battery_full'
-            elif 'شحن' in message:
-                notification_type = 'charging'
-            
-            # إرسال مع النظام الذكي
             self.notification_manager.send_notification(
                 title, message, urgency, notification_type
             )
@@ -996,12 +990,8 @@ class ModernUI(QMainWindow):
             
             # التحقق من صحة القيم
             if auto_enabled and max_charge <= min_charge:
-                from PyQt6.QtWidgets import QMessageBox
-                QMessageBox.warning(
-                    self,
-                    "خطأ في الإعدادات",
-                    "الحد الأقصى للشحن يجب أن يكون أكبر من الحد الأدنى"
-                )
+                dialogs.warn(self, t('dialog.settings_error'),
+                             t('dialog.ceiling_above_floor'))
                 return
             
             # حفظ القيم
@@ -1019,14 +1009,10 @@ class ModernUI(QMainWindow):
                         # مزامنة الصلاحيات مع جميع المكونات
                         self._sync_permissions()
                     else:
-                        from PyQt6.QtWidgets import QMessageBox
-                        result = QMessageBox.question(
-                            self,
-                            "صلاحيات محدودة",
-                            "لم يتم الحصول على الصلاحيات الكاملة.\nسيعمل التطبيق بالإشعارات فقط.\n\nهل تريد المتابعة؟",
-                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                        )
-                        if result == QMessageBox.StandardButton.No:
+                        if not dialogs.confirm(
+                                self, t('perm.limited_title'),
+                                t('perm.limited'),
+                                detail=t('perm.continue_question')):
                             return
                 
                 # تفعيل التحكم
@@ -1219,7 +1205,7 @@ class ModernUI(QMainWindow):
                 t('guard.notify.offender', name=offender.name,
                   watts=round(offender.watts, 1),
                   loss=round(offender.annual_capacity_loss, 2)),
-                'normal')
+                'normal', notification_type='guard_offender')
         except Exception as e:
             logger.debug(f"تعذّر إشعار الحارس: {e}")
 
@@ -1248,11 +1234,10 @@ class ModernUI(QMainWindow):
         إيقاف نهائي بطلب صريح، بعد تأكيد. لا يُنفَّذ تلقائياً في أي حالة،
         لأن خسارة عمل غير محفوظ أغلى من أي توفير في الطاقة.
         """
-        answer = QMessageBox.warning(
-            self, t('guard.title'), t('guard.confirm_terminate', name=name),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No)
-        if answer != QMessageBox.StandardButton.Yes:
+        if not dialogs.confirm(self, t('guard.title'),
+                               t('guard.confirm_terminate', name=name),
+                               confirm_text=t('guard.action.terminate'),
+                               destructive=True):
             return
         self._run_guard_action(self.guard_service.terminate, name)
 
@@ -1362,48 +1347,46 @@ class ModernUI(QMainWindow):
         """تحديث إحصائيات التحسين التلقائي"""
         try:
             stats = self.auto_optimizer.get_statistics()
-            system_status = self.auto_optimizer.get_system_status()
-            
+
             # تحديث حالة النظام في السجل
             if stats.get('needs_optimization'):
                 priority = stats.get('optimization_priority', 0)
                 health = stats.get('system_health_score', 100)
-                
+
                 if priority >= 7:
                     self.log_event(f"النظام يحتاج تحسين عاجل - الأولوية: {priority}/10, الصحة: {health}%")
                 elif priority >= 4:
                     self.log_event(f"النظام يحتاج تحسين - الأولوية: {priority}/10, الصحة: {health}%")
-            
+
             # تحديث الإحصائيات في الواجهة إذا كانت موجودة
             if hasattr(self, 'auto_opt_count_label'):
                 self.auto_opt_count_label.setText(f"{stats.get('optimization_count', 0)}")
-            
+
             if hasattr(self, 'auto_opt_power_saved_label'):
-                self.auto_opt_power_saved_label.setText(f"{stats.get('total_power_saved', 0):.1f}%")
-            
+                # التوفير مقيس بالواط لا بالنسبة. كان يُعرض بعلامة ٪ تحت عنوان
+                # «الطاقة الموفرة»، وهي نفس المبالغة التي أُزيلت من المحسّن:
+                # وحدة خاطئة تجعل 2.5 واط تبدو 2.5٪ من شيء غير محدّد.
+                saved = self.optimizer.get_statistics().get('watts_saved_total') or 0
+                self.auto_opt_power_saved_label.setText(
+                    f"{saved:.1f} {t('unit.watt')}" if saved else '—')
+
             if hasattr(self, 'system_health_label'):
                 health = stats.get('system_health_score', 100)
                 self.system_health_label.setText(f"{health}%")
-                
-                # تغيير اللون حسب الصحة
+                # اللون من نظام التصميم: كانت هنا أربع قيم سداسية تكرّر
+                # STATE_OK / STATE_MAINS / STATE_WARN / STATE_CRITICAL
                 if health >= 80:
-                    color = "#10b981"
+                    color = theme.STATE_OK
                 elif health >= 60:
-                    color = "#3b82f6"
+                    color = theme.STATE_MAINS
                 elif health >= 40:
-                    color = "#f59e0b"
+                    color = theme.STATE_WARN
                 else:
-                    color = "#ef4444"
-                
-                self.system_health_label.setStyleSheet(f"""
-                    QLabel {{
-                        font-size: 18px;
-                        color: {color};
-                        background: transparent;
-                        font-weight: 700;
-                    }}
-                """)
-            
+                    color = theme.STATE_CRITICAL
+                self.system_health_label.setStyleSheet(
+                    theme.font_css(theme.SIZE_SECTION, 700, color=color)
+                    + ' background: transparent;')
+
         except Exception as e:
             logger.error(f"خطأ في تحديث إحصائيات التحسين التلقائي: {e}")
     
@@ -1415,10 +1398,9 @@ class ModernUI(QMainWindow):
                 self.enable_notifications.setChecked(self.settings.value('enable_notifications', True, type=bool))
             if hasattr(self, 'low_battery_spin'):
                 self.low_battery_spin.setValue(self.settings.value('low_battery_threshold', 20, type=int))
-            if hasattr(self, 'charge_threshold_spin'):
-                self.charge_threshold_spin.setValue(self.settings.value('charge_threshold', 40, type=int))
-            if hasattr(self, 'unplug_threshold_spin'):
-                self.unplug_threshold_spin.setValue(self.settings.value('unplug_threshold', 80, type=int))
+            # `charge_threshold_spin` و`unplug_threshold_spin` لا وجود لهما في
+            # الواجهة: القيمتان نفسهما تُضبطان من `optimal_min_spin` و
+            # `optimal_max_spin`. تُكتب المفاتيح القديمة للتوافق ولا تُقرأ هنا.
         
             # إعدادات الإشعارات الجديدة
             if hasattr(self, 'enable_sounds'):
@@ -1613,65 +1595,53 @@ class ModernUI(QMainWindow):
     
     def clear_log(self):
         """مسح السجل من الواجهة والملف"""
-        from PyQt6.QtWidgets import QMessageBox
-        
-        reply = QMessageBox.question(
-            self,
-            'تأكيد المسح',
-            'هل أنت متأكد من مسح سجل الأحداث؟\nلا يمكن التراجع عن هذا الإجراء.',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            try:
-                self.events_log.clear()
-                from resource_path import get_data_path
-                log_file = get_data_path('battery_events.log')
-                if log_file.exists():
-                    log_file.unlink()
-                self._log_write_count = 0
-                logger.info("تم مسح سجل الأحداث")
-            except Exception as e:
-                logger.error(f"خطأ في مسح السجل: {e}")
-                QMessageBox.warning(self, "خطأ", f"فشل مسح السجل: {e}")
+        if not dialogs.confirm(self, t('dialog.clear_log_title'),
+                               t('dialog.clear_log_body'),
+                               detail=t('dialog.clear_log_detail'),
+                               confirm_text=t('action.clear'),
+                               destructive=True):
+            return
+        try:
+            self.events_log.clear()
+            from resource_path import get_data_path
+            log_file = get_data_path('battery_events.log')
+            if log_file.exists():
+                log_file.unlink()
+            self._log_write_count = 0
+            logger.info("تم مسح سجل الأحداث")
+        except Exception as e:
+            logger.error(f"خطأ في مسح السجل: {e}")
+            dialogs.error(self, t('dialog.error_title'),
+                          t('dialog.clear_log_failed', error=e))
     
     def reset_ai_data(self):
         """إعادة تعيين بيانات الذكاء الاصطناعي"""
-        from PyQt6.QtWidgets import QMessageBox
-        
-        reply = QMessageBox.question(
-            self,
-            'تأكيد إعادة التعيين',
-            'هل أنت متأكد من إعادة تعيين بيانات الذكاء الاصطناعي؟\n'
-            'سيتم حذف جميع الأنماط المتعلمة والتوصيات.\n'
-            'لا يمكن التراجع عن هذا الإجراء.',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            try:
-                # تصفير داخل نفس الكائن حتى تبقى مراجع خيط المراقبة
-                # والمحسّنات صالحة (استبدال الكائن كان يُحيي البيانات القديمة)
-                self.ai.reset()
-                # تعلّم الحارس جزء من الذكاء نفسه: تركه يعني بقاء نموذج طاقة
-                # وسجل مخالفين مبنيين على بيانات أُعلن مسحها.
-                self.guard_service.reset()
-                self._last_intelligence = None
-                
-                # تحديث الواجهة
-                if hasattr(self, 'recommendations_text'):
-                    self.recommendations_text.setPlainText("تم إعادة التعيين. جارٍ التعلم من جديد...")
-                if hasattr(self, 'prediction_text'):
-                    self.prediction_text.setText("تم إعادة التعيين. جارٍ جمع بيانات جديدة...")
-                
-                self.log_event("تم إعادة تعيين بيانات الذكاء الاصطناعي بنجاح")
-                logger.info("تم إعادة تعيين بيانات AI")
-                QMessageBox.information(self, "نجح", "تم إعادة تعيين بيانات الذكاء الاصطناعي.\nسيبدأ التعلم من جديد.")
-            except Exception as e:
-                logger.error(f"خطأ في إعادة تعيين AI: {e}")
-                QMessageBox.warning(self, "خطأ", f"فشل إعادة تعيين AI: {e}")
+        if not dialogs.confirm(self, t('dialog.reset_ai_title'),
+                               t('dialog.reset_ai_body'),
+                               detail=t('dialog.clear_log_detail'),
+                               confirm_text=t('action.clear'),
+                               destructive=True):
+            return
+        try:
+            # تصفير داخل نفس الكائن حتى تبقى مراجع خيط المراقبة
+            # والمحسّنات صالحة (استبدال الكائن كان يُحيي البيانات القديمة)
+            self.ai.reset()
+            # تعلّم الحارس جزء من الذكاء نفسه: تركه يعني بقاء نموذج طاقة
+            # وسجل مخالفين مبنيين على بيانات أُعلن مسحها.
+            self.guard_service.reset()
+            self._last_intelligence = None
+
+            if hasattr(self, 'prediction_text'):
+                self.prediction_text.setText(t('record.learning'))
+
+            self.log_event(t('dialog.reset_ai_done'))
+            logger.info("تم إعادة تعيين بيانات AI")
+            dialogs.success(self, t('dialog.reset_ai_title'),
+                            t('dialog.reset_ai_done'))
+        except Exception as e:
+            logger.error(f"خطأ في إعادة تعيين AI: {e}")
+            dialogs.error(self, t('dialog.error_title'),
+                          t('dialog.reset_ai_failed', error=e))
     
     def closeEvent(self, event):
         """معالجة إغلاق النافذة"""
@@ -1691,7 +1661,13 @@ class ModernUI(QMainWindow):
         لتجنب مسح سجل كامل (آلاف العينات) كل ثانيتين دون حاجة"""
         if not hasattr(self, 'total_charge_time_label'):
             return
-        if not hasattr(self, 'stats_tab') or self.tabs.currentWidget() is not self.stats_tab:
+        # الحرس يجب أن يقيس ما هو مرئي فعلاً. مقارنة التبويب لم تعد كافية بعد
+        # دمج المجالات: `stats_tab` أصبح نفس `details_tab`، فكان المسح الثقيل
+        # يعمل كل نبضة كلما فُتح مجال التفاصيل ولو كان قسم السجل مطويّاً.
+        if self.tabs.currentWidget() is not getattr(self, 'details_tab', None):
+            return
+        record_section = (getattr(self, 'details_sections', None) or {}).get('record')
+        if record_section is not None and not record_section.is_expanded():
             return
         
         # حساب أوقات الشحن والاستخدام
@@ -1724,11 +1700,13 @@ class ModernUI(QMainWindow):
         # تحديث الأوقات
         charge_hours = int(charge_time // 60)
         charge_mins = int(charge_time % 60)
-        self.total_charge_time_label.setText(f"{charge_hours}س {charge_mins}د")
+        self.total_charge_time_label.setText(
+            f"{charge_hours}{t('unit.hour_short')} {charge_mins}{t('unit.minute_short')}")
         
         discharge_hours = int(discharge_time // 60)
         discharge_mins = int(discharge_time % 60)
-        self.total_discharge_time_label.setText(f"{discharge_hours}س {discharge_mins}د")
+        self.total_discharge_time_label.setText(
+            f"{discharge_hours}{t('unit.hour_short')} {discharge_mins}{t('unit.minute_short')}")
         
         # متوسط مستوى البطارية
         if battery_levels:
@@ -1746,134 +1724,98 @@ class ModernUI(QMainWindow):
         if power_draws:
             avg_power = sum(power_draws) / len(power_draws)
             peak_power = max(power_draws)
-            self.avg_power_draw_label.setText(f"{avg_power:.1f} W")
-            self.peak_power_draw_label.setText(f"{peak_power:.1f} W")
+            self.avg_power_draw_label.setText(f"{avg_power:.1f} {t('unit.watt')}")
+            self.peak_power_draw_label.setText(f"{peak_power:.1f} {t('unit.watt')}")
         else:
-            self.avg_power_draw_label.setText("0 W")
-            self.peak_power_draw_label.setText("0 W")
+            self.avg_power_draw_label.setText('—')
+            self.peak_power_draw_label.setText('—')
     
     def run_optimization(self):
-        """تشغيل التحسين الذكي المتقدم مع الذكاء الاصطناعي"""
-        # استخدام الصلاحيات المحفوظة أو طلبها مرة واحدة
-        if not self.permission_manager.has_admin_rights:
-            if self.permission_manager.request_permissions(self):
-                # مزامنة الصلاحيات مع جميع المكونات
-                self._sync_permissions()
-        
-        # تمرير محرك الذكاء الاصطناعي للمحسن
+        """
+        تشغيل جولة تحسين آمنة.
+
+        لا طلب صلاحيات هنا: كل إجراء في المحسّن متاح لمالك الجلسة. طلب كلمة
+        مرور المستخدم لضبط سطوع شاشته كان خطأ أمنياً لا ميزة.
+        """
         self.optimizer.ai_engine = self.ai
-        
+
         self.optimize_button.setEnabled(False)
-        self.optimize_button.setText("تحليل ذكي جارٍ...")
-        self.optimize_status.setText("الذكاء الاصطناعي يحلل أنماط الاستخدام ويحدد أفضل التحسينات...")
-        
-        # تشغيل التحسين الذكي في خيط منفصل
+        self.optimize_button.setText(t('opt.running'))
+        self.optimize_status.setText(t('opt.running'))
+
         from PyQt6.QtCore import QThread, pyqtSignal
-        
-        class IntelligentOptimizationThread(QThread):
-            # ملاحظة: لا نسمّيه finished حتى لا يظلّل إشارة QThread الأصلية
+
+        class OptimizationThread(QThread):
+            # لا تُسمّى finished حتى لا تظلّل إشارة QThread الأصلية
             optimization_done = pyqtSignal(dict)
-            progress = pyqtSignal(str)
-            
-            def __init__(self, optimizer, ai_engine):
+
+            def __init__(self, optimizer):
                 super().__init__()
                 self.optimizer = optimizer
-                self.ai_engine = ai_engine
-            
+
             def run(self):
-                # إرسال تحديثات التقدم
-                self.progress.emit("تحليل حالة النظام...")
-                
-                # تحسين ذكي متقدم
-                result = self.optimizer.optimize_battery(
-                    use_cached_password=True, 
-                    optimization_mode='intelligent'
-                )
-                
-                self.progress.emit("اكتمل التحليل الذكي")
-                self.optimization_done.emit(result)
-        
-        self.opt_thread = IntelligentOptimizationThread(self.optimizer, self.ai)
-        self.opt_thread.optimization_done.connect(self._on_intelligent_optimization_complete)
-        self.opt_thread.progress.connect(self._on_optimization_progress)
+                self.optimization_done.emit(self.optimizer.optimize_battery())
+
+        self.opt_thread = OptimizationThread(self.optimizer)
+        self.opt_thread.optimization_done.connect(self._on_optimization_complete)
         self.opt_thread.start()
-    
-    def _on_optimization_progress(self, message):
-        """تحديث تقدم التحسين الذكي"""
-        self.optimize_status.setText(message)
-    
-    def _on_intelligent_optimization_complete(self, result):
-        """معالجة نتيجة التحسين الذكي المتقدم"""
-        self.optimize_button.setEnabled(True)
-        self.optimize_button.setText("تحسين ذكي متقدم")
-        
-        if result['success']:
-            power_saved = result.get('power_saved', 0)
-            actions_count = len([a for a in result['actions'] if a.get('success', True)])
-            intelligence_score = result.get('intelligence_score', 0)
-            predicted_improvement = result.get('predicted_improvement', 0)
-            ai_recommendations = result.get('ai_recommendations', [])
-            personalized_actions = result.get('personalized_actions', [])
-            
-            # عرض النتائج الذكية
-            status_text = f"تم التحسين الذكي بنجاح!\n"
-            status_text += f"درجة الذكاء: {intelligence_score}% • تحسين متوقع: {predicted_improvement}%\n"
-            status_text += f"توفير فعلي: ~{power_saved:.1f}% • تحسينات مطبقة: {actions_count}\n\n"
-            
-            # عرض التوصيات الذكية
-            if ai_recommendations:
-                status_text += "توصيات الذكاء الاصطناعي:\n"
-                for rec in ai_recommendations[:3]:  # أول 3 توصيات
-                    status_text += f"   • {rec}\n"
-                status_text += "\n"
-            
-            # عرض التحسينات الرئيسية
-            status_text += "التحسينات المطبقة:\n"
-            for action in result['actions'][:5]:  # أول 5 تحسينات
-                if action.get('success', True):
-                    power_saved_action = action.get('power_saved', 0)
-                    status_text += f"{action['name']}: {action['details']}"
-                    if power_saved_action > 0:
-                        status_text += f" (~{power_saved_action:.1f}%)"
-                    status_text += "\n"
-            
-            # عرض التحسينات الشخصية
-            if personalized_actions:
-                status_text += "\n تحسينات شخصية:\n"
-                for action in personalized_actions:
-                    status_text += f"{action['name']}: {action['details']}\n"
-            
-            self.optimize_status.setText(status_text)
-            self.optimize_status.setStyleSheet("font-size: 12px; color: #8b5cf6; background: transparent;")
-            
-            # تحديث شريط الحالة
-            self.status_label.setText(f"تحسين ذكي مكتمل - توفير ~{power_saved:.1f}%")
-            QTimer.singleShot(8000, lambda: self.status_label.setText("جاهز للعمل"))
-            
-            # تسجيل في السجل
-            self.log_event(f"تحسين ذكي مكتمل - درجة الذكاء: {intelligence_score}% - توفير: {power_saved:.1f}%")
-            
-            # إرسال إشعار ذكي
-            if power_saved > 10:
-                self.send_notification(
-                    "تحسين ذكي مكتمل!",
-                    f"تم توفير {power_saved:.1f}% من الطاقة بفضل الذكاء الاصطناعي",
-                    "success"
-                )
-        else:
-            errors = result.get('errors', [])
-            error_text = "حدث خطأ في التحسين الذكي"
-            if errors:
-                error_text += f"\nالأخطاء: {', '.join(errors[:2])}"
-            
-            self.optimize_status.setText(error_text)
-            self.optimize_status.setStyleSheet("font-size: 12px; color: #ef4444; background: transparent;")
-            self.status_label.setText("فشل التحسين الذكي")
-            QTimer.singleShot(3000, lambda: self.status_label.setText("جاهز للعمل"))
-    
+
+    def restore_optimization(self):
+        """إرجاع كل ما غيّرته جولات التحسين إلى أصله"""
+        result = self.optimizer.restore()
+        self.optimize_status.setText(result.get('message', ''))
+        self.log_event(result.get('message', ''))
+        self._refresh_optimizer_controls()
+
+    def _refresh_optimizer_controls(self):
+        """
+        إظهار زر الاستعادة فقط عند وجود ما يُستعاد، وإخفاء زر التحسين إذا
+        لم يكن على هذا الجهاز أي إجراء ممكن.
+        """
+        if not hasattr(self, 'restore_button'):
+            return
+        stats = self.optimizer.get_statistics()
+        self.restore_button.setVisible(bool(stats.get('pending_restore')))
+
     def _on_optimization_complete(self, result):
-        """معالجة نتيجة التحسين العادي (للتوافق مع النسخة القديمة)"""
-        self._on_intelligent_optimization_complete(result)
+        """
+        عرض نتيجة الجولة: ما نُفّذ، ما امتُنع عنه ولماذا، والتوفير المقيس
+        وحده. الإصدار السابق كان يجمع أرقاماً ثابتة مكتوبة في الشيفرة
+        ويعرضها كـ«توفير فعلي».
+        """
+        self.optimize_button.setEnabled(True)
+        self.optimize_button.setText(t('action.optimize'))
+
+        actions = result.get('actions', [])
+        applied = [action for action in actions if action.get('success')]
+        declined = [action for action in actions if action.get('declined')]
+
+        lines = []
+        if result.get('power_saved_measured') and result.get('power_saved'):
+            lines.append(t('opt.measured_saving', watts=result['power_saved']))
+        elif applied:
+            lines.append(t('opt.saving_unmeasurable'))
+
+        for action in applied:
+            lines.append(f"• {action['name']}: {action['details']}")
+
+        if declined:
+            lines.append('')
+            lines.append(t('opt.title_declined'))
+            for action in declined:
+                lines.append(f"• {action['name']}: {action['details']}")
+
+        for error in result.get('errors', [])[:2]:
+            lines.append(f"• {error}")
+
+        self.optimize_status.setText('\n'.join(lines) or t('opt.nothing_to_restore'))
+        self._refresh_optimizer_controls()
+
+        summary = f"{t('opt.applied_count', count=len(applied))} · " \
+                  f"{t('opt.declined_count', count=len(declined))}"
+        self.status_label.setText(summary)
+        QTimer.singleShot(8000, lambda: self.status_label.setText(t('app.ready')))
+        self.log_event(summary)
     
     def export_log(self):
         """تصدير السجل الكامل إلى ملف"""
@@ -2003,6 +1945,14 @@ class ModernUI(QMainWindow):
             self.auto_optimizer.stop()
         except Exception as e:
             logger.debug(f"إيقاف المحسن التلقائي: {e}")
+        # ثم استعادة ما غيّره المحسّن: لا يجوز أن يبقى سطوع مخفوض أو أولوية
+        # مخفوضة بعد اختفاء التطبيق الذي غيّرهما ولا يعرف المستخدم سببهما.
+        try:
+            restored = self.optimizer.restore()
+            if restored.get('success'):
+                logger.info(f"استعادة ضبط النظام: {restored.get('message')}")
+        except Exception as e:
+            logger.error(f"استعادة ضبط النظام: {e}")
         try:
             self.notification_manager.stop_all_reminders()
         except Exception as e:
@@ -2011,6 +1961,12 @@ class ModernUI(QMainWindow):
         step(3, "إيقاف المراقبة...")
         if getattr(self, 'monitor_thread', None) is not None:
             self.monitor_thread.stop(timeout_ms=4000)
+
+        # خيط الفحص العميق: بلا انتظاره كان يبقى يقرأ العتاد بينما يُغلق
+        # مجمّع القراءة، فتنتهي العملية بأثر استثناء لا يفهمه المستخدم.
+        worker = getattr(self, '_diagnostics_worker', None)
+        if worker is not None and worker.isRunning():
+            worker.wait(4000)
 
         step(4, "حفظ البيانات...")
         try:
@@ -2137,12 +2093,6 @@ class ModernUI(QMainWindow):
             if not hasattr(self, 'ai') or not self.ai:
                 return alerts
             
-            # الحصول على توصيات التحسين
-            recommendations = self.ai.get_optimization_recommendations(
-                battery_status['percent'], 
-                battery_status['is_charging']
-            )
-            
             # التوصيات المهيكلة تحمل شدّتها، فلا حاجة لاستنتاجها من نص الرسالة
             health = self.monitor.get_battery_health()
             floor, ceiling = self.current_window()
@@ -2164,7 +2114,7 @@ class ModernUI(QMainWindow):
             if health_score < 80:
                 alerts.append({
                     'type': 'battery_degradation',
-                    'message': f'تدهور في صحة البطارية مكتشف (درجة الصحة: {health_score}%)',
+                    'message': t('alert.degradation_detected', health=health_score),
                     'confidence': 90
                 })
             
@@ -2175,7 +2125,7 @@ class ModernUI(QMainWindow):
             if current_hour in optimal_times and not battery_status['is_charging']:
                 alerts.append({
                     'type': 'optimal_charge_time',
-                    'message': 'الآن وقت مثالي للشحن بناءً على أنماط استخدامك',
+                    'message': t('alert.optimal_charge_time'),
                     'confidence': 80
                 })
             

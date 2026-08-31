@@ -130,25 +130,25 @@ class AutoOptimizer:
                 'timestamp': datetime.now().isoformat()
             }
             
-            # قياس استهلاك الطاقة
+            # قياس استهلاك الطاقة من العتاد.
+            # كان هنا تقدير مختلق (cpu*0.15 + mem*0.05 + 5) يُقارن بعتبة واط
+            # فيشعل التحسين التلقائي على رقم لم يُقرأ من أي مقياس. القدرة
+            # تُقرأ الآن من العتاد أو لا تُعرض: عتبة على قيمة موهومة أسوأ من
+            # غياب العتبة.
             try:
                 battery = psutil.sensors_battery()
                 if battery:
                     self.system_status['battery_percent'] = battery.percent
                     self.system_status['is_charging'] = battery.power_plugged
-                    
-                    # تقدير استهلاك الطاقة
-                    if hasattr(battery, 'power_plugged') and not battery.power_plugged:
-                        # تقدير تقريبي بناءً على استخدام CPU والذاكرة
-                        cpu_power = self.system_status['cpu_percent'] * 0.15
-                        memory_power = self.system_status['memory_percent'] * 0.05
-                        self.system_status['power_draw'] = cpu_power + memory_power + 5
-                    else:
-                        self.system_status['power_draw'] = 0
-            except:
-                self.system_status['battery_percent'] = 50
-                self.system_status['is_charging'] = False
-                self.system_status['power_draw'] = 0
+            except Exception:
+                pass
+
+            try:
+                measured = self.optimizer.get_system_status().get('power_draw')
+                if isinstance(measured, (int, float)) and measured > 0:
+                    self.system_status['power_draw'] = float(measured)
+            except Exception as e:
+                logger.debug(f"تعذّرت قراءة القدرة المقيسة: {e}")
             
             # حساب درجة صحة النظام
             self._calculate_system_health()
@@ -190,11 +190,12 @@ class AutoOptimizer:
             elif processes > 200:
                 health -= 5
             
-            power = self.system_status.get('power_draw', 0)
-            if power > 20:
-                health -= 15
-            elif power > 15:
-                health -= 8
+            power = self.system_status.get('power_draw')
+            if isinstance(power, (int, float)):
+                if power > 20:
+                    health -= 15
+                elif power > 15:
+                    health -= 8
             
             self.system_health_score = max(0, health)
             self.system_status['health_score'] = self.system_health_score
@@ -235,11 +236,12 @@ class AutoOptimizer:
                 self.optimization_priority += 2
                 reasons.append(f"عمليات كثيرة ({processes})")
             
-            power = self.system_status.get('power_draw', 0)
-            if power > self.thresholds['power_draw']:
+            # القدرة: تُفحص فقط إذا وفّرها العتاد فعلاً
+            power = self.system_status.get('power_draw')
+            if isinstance(power, (int, float)) and power > self.thresholds['power_draw']:
                 self.needs_optimization = True
                 self.optimization_priority += 2
-                reasons.append(f"استهلاك طاقة عالي ({power:.1f}W)")
+                reasons.append(f"قدرة مقيسة عالية ({power:.1f}W)")
             
             # فحص صحة النظام
             if self.system_health_score < 60:
@@ -357,7 +359,7 @@ class AutoOptimizer:
                 if len(self.optimization_history) > 100:
                     self.optimization_history = self.optimization_history[-100:]
                 
-                logger.info(f"التحسين ناجح - توفير: {power_saved:.1f}% طاقة")
+                logger.info(f"التحسين ناجح - توفير مقيس: {power_saved:.1f} واط")
                 
                 # إعادة قياس صحة النظام
                 time.sleep(2)

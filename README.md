@@ -135,11 +135,38 @@
 هذه الجداول تصف اتجاهاً عاماً لخلايا ليثيوم تجارية، والبطاريات لا تتصرف كلها
 بنفس الشكل. لذلك كل ناتج مبني على قيمة غير مقروءة من العتاد يُعلَم بأنه مفترض.
 
+### المحسّن: يخفض السحب، ويستعيد كل ما غيّره، ويعلن ما امتنع عنه
+
+كل تغيير يجريه التطبيق على النظام خارج حدود الشحن يمرّ من `system_tuning.py`
+وحده، بقواعد ملزمة:
+
+| المبدأ | التطبيق |
+|---|---|
+| لا تغيير بلا طريق رجوع | كل قيمة تُغيَّر تُحفَظ قبلها في لقطة على القرص، فيبقى التراجع ممكناً بعد إعادة التشغيل |
+| السطوع يُخفَض ولا يُرفَع | إن أنزلته أنت فلن يرفعه التطبيق، ولا ينزل تحت 30٪، واللقطة تُكتب بعد نجاح الكتابة وحده |
+| اللوحة الداخلية فقط | eDP / LVDS / DSI. أي `backlight` خارجي (ddcci) ليس ملك التطبيق |
+| الشاشة الخارجية خط أحمر | عند وصل شاشة خارجية تُلغى كل إجراءات إدارة طاقة الرسوم |
+| لا صلاحيات لما لا يحتاجها | السطوع عبر مسار الجلسة المصرّح به (GNOME ثم logind)، بلا كلمة مرور |
+| لا رقم بلا قياس | التوفير يُقرأ من العتاد قبل وبعد، أو يُعلَن أنه غير قابل للقياس |
+
+**ما لا يفعله التطبيق أبداً، ويقوله في نتيجة كل جولة**: التعليق الشامل لأجهزة
+USB (يفصل محطات الإرساء ولوحة المفاتيح والفأرة)، وحجب البلوتوث (يُسقط الفأرة)،
+وإجبار مستوى أداء الرسوم على منخفض (يُسقط الشاشة الخارجية)، وإفراغ ذاكرة القرص
+المخبّأة (يُجبر إعادة القراءة من القرص فيزيد السحب لا يقلّله)، وتغيير
+`swappiness` أو مجدول القرص (تغيير دائم بلا مكسب مثبت)، وخفض أولوية المعالج
+بـ `renice` (غير قابل للاستعادة بلا صلاحيات).
+
+الامتناع نتيجة معلنة لا صمت: كل ما لم يُنفَّذ يظهر مع سببه، ولا يُزعم نجاحه.
+
 ### الواجهة
 
-خمسة مجالات مستقلة: الحالة، التحكم، التحليل، السجل، الإعدادات. عربية بالكامل
-باتجاه من اليمين إلى اليسار، مع طبقة ترجمة في `locales/` وأيقونات مرسومة
-بمسارات (بلا إيموجي)، ونظام تصميم واحد في `theme.py` لا قيم لونية متفرقة.
+أربعة مجالات: الحالة، التحكم، التفاصيل، الإعدادات. القراءة الأساسية وما
+يستدعي تدخّلاً في الأول، والتحكّم فيما يدعمه العتاد في الثاني، والتحليل والسجل
+والتشخيص في أقسام تُفتح بالطلب في الثالث. ما لا يدعمه جهازك يُطوى ولا يُعرض
+كزر جاهز لا يعمل. عربية بالكامل باتجاه من اليمين إلى اليسار، مع طبقة ترجمة في
+`locales/` وأيقونات مرسومة بمسارات (بلا إيموجي)، ونظام تصميم واحد في `theme.py`
+لا قيم لونية متفرقة، وطبقة حوارات واحدة في `dialogs.py` (لا `QMessageBox` يرسمه
+النظام بخلفية فاتحة وأزرار لاتينية داخل واجهة عربية داكنة).
 
 ### المتطلبات
 
@@ -223,10 +250,12 @@ settings_bridge.py       مصدر واحد لقراءة الإعدادات (بو
 charge_controller.py     واجهة التحكم
 charge_control_advanced.py  التنفيذ الفعلي لحدود الشحن
 notification_manager.py  الإشعارات والتذكيرات والأصوات
-battery_optimizer.py     تحسينات النظام اليدوية
-auto_optimizer.py        المحسن التلقائي في الخلفية
+system_tuning.py         محرك الضبط الآمن: لقطة، استعادة، وبوابات سلامة
+battery_optimizer.py     المحسّن: إجراءات مقيسة قابلة للتراجع وامتناعات معلنة
+auto_optimizer.py        المحسن التلقائي في الخلفية (معطّل افتراضياً)
+dialogs.py               طبقة الحوارات الموحدة (لا QMessageBox في المشروع)
 storage.py               تخزين JSON ذري آمن بين الخيوط
-tests/                   حزمة pytest (282 اختباراً)
+tests/                   حزمة pytest (357 اختباراً)
 docs/OPERATIONS.md       دليل التشغيل الدائم واستكشاف الأخطاء
 ```
 
@@ -237,10 +266,26 @@ pip install pytest pytest-timeout
 pytest
 ```
 
-تعمل الحزمة كاملة بلا شاشة عبر `QT_QPA_PLATFORM=offscreen` (282 اختباراً في
-نحو 44 ثانية)، وتغطي محرك التآكل والنصائح، وكشف البطارية غير المبلّغة، وملف
+تعمل الحزمة كاملة بلا شاشة عبر `QT_QPA_PLATFORM=offscreen` (357 اختباراً في
+نحو 36 ثانية)، وتغطي محرك التآكل والنصائح، وكشف البطارية غير المبلّغة، وملف
 الاستخدام وأعماق التفريغ، ومنطق الإشعارات والتهدئة، والتخزين الذري والاسترجاع
 من ملف تالف، واكتشاف النسخة الواحدة، ودورة حياة النافذة كاملة.
+
+وتغطي في المحسّن ما يلي، وكلّه انحدارات على أعطال حقيقية أصابت أجهزة مستخدمين:
+
+- أن السطوع **لا يُرفع** أبداً بعد أن ينزله المستخدم، ولا ينزل تحت الحدّ
+  الأدنى، وأن الاستعادة تعيد القيمة الأصلية بالضبط.
+- أن الامتناع لا يُنشئ «تغييراً ينتظر الاستعادة»، وأن اللقطة تبقى على القرص
+  عند فشل الاستعادة ولا تُحذف.
+- أن بوابة الرسوم تمنع التصرّف عند وصل شاشة خارجية، وعند تعذّر قراءة حالة
+  الشاشات (الجهل ليس إذناً بالتصرف).
+- أن أجهزة `backlight` الخارجية (ddcci) مستبعدة، واللوحة الداخلية وحدها هي
+  ملك التطبيق.
+- أن أياً من الأوامر التي أعطبت أجهزة لا يعود إلى الشيفرة: تعليق USB الشامل،
+  و`rfkill`، و`power_dpm_force_performance_level`، و`card0` المثبّت،
+  و`drop_caches`، و`swappiness`، ومجدول القرص، و`cpupower`، و`sudo`.
+  الفحص يجري على شيفرة الوحدة بعد استثناء التوثيق بـ `ast`.
+- أن لا رقم توفير يُعلَن بلا قياس من العتاد قبل وبعد.
 
 وتغطي في طبقات الحارس ما يلي، وأكثره يقيس أن التطبيق **يمتنع** حيث يجب:
 
@@ -373,12 +418,40 @@ These tables describe a general trend for commercial lithium cells, and not all
 batteries behave the same. Any result built on a value that was not read from
 the hardware is labelled as assumed.
 
+### The optimizer: it lowers draw, restores everything it changed, and declares what it refused
+
+Every system change outside charge limits goes through `system_tuning.py` alone:
+
+| Principle | How it is enforced |
+|---|---|
+| No change without a way back | Every value is snapshotted to disk before it is changed, so undo survives a restart |
+| Brightness is lowered, never raised | If you lowered it, the app will not raise it; it never goes below 30%; the snapshot is written only after a successful write |
+| Internal panel only | eDP / LVDS / DSI. Any external `backlight` (ddcci) is not the app's business |
+| An external display is a red line | While one is connected, all graphics power-management actions are cancelled |
+| No privileges for work that needs none | Brightness goes through the permitted session path (GNOME, then logind) with no password |
+| No figure without a measurement | Savings are read from hardware before and after, or declared unmeasurable |
+
+**What it never does, and says so in every result**: blanket USB autosuspend
+(disconnects docks, keyboards and mice), Bluetooth blocking (drops your mouse),
+forcing the GPU performance level low (drops the external display), dropping the
+page cache (forces re-reads from disk, raising draw rather than lowering it),
+changing `swappiness` or the disk scheduler (permanent, with no proven gain), and
+lowering CPU priority with `renice` (not reversible without privileges).
+
+A refusal is a declared result, not silence: everything not applied is shown with
+its reason, and never reported as success.
+
 ### Interface
 
-Five separate areas: Status, Control, Analysis, Record, Settings. Fully Arabic
-and right-to-left, with a translation layer in `locales/`, path-drawn icons and
-no emoji, and one design system in `theme.py` rather than scattered colour
-values.
+Four areas: Status, Control, Details, Settings. The primary reading and anything
+that calls for action live in the first; control over what the hardware supports
+in the second; analysis, record and diagnostics in on-demand sections in the
+third. What your machine does not support is folded away instead of being shown
+as a ready button that cannot work. Fully Arabic and right-to-left, with a
+translation layer in `locales/`, path-drawn icons and no emoji, one design system
+in `theme.py` rather than scattered colour values, and one dialog layer in
+`dialogs.py` (no OS-drawn `QMessageBox` with a light background and Latin buttons
+inside a dark Arabic interface).
 
 ### Requirements
 
@@ -434,8 +507,8 @@ pip install pytest pytest-timeout
 pytest
 ```
 
-The suite runs fully headless with `QT_QPA_PLATFORM=offscreen` (282 tests in
-about 44 seconds) and covers the wear and advice engine, non-reporting battery
+The suite runs fully headless with `QT_QPA_PLATFORM=offscreen` (357 tests in
+about 36 seconds) and covers the wear and advice engine, non-reporting battery
 detection, the usage profile and discharge depths, notification cooldown logic,
 atomic storage and corrupt-file recovery, single-instance detection, and a full
 window lifecycle.

@@ -91,6 +91,11 @@ def read_text_bounded(path: Path, timeout: float = SYSFS_READ_TIMEOUT) -> Option
     except (OSError, ValueError) as e:
         logger.debug(f"تعذّرت قراءة {path}: {e}")
         return None
+    except RuntimeError as e:
+        # `cannot schedule new futures after shutdown`: يحدث عند إغلاق التطبيق
+        # أثناء فحص عميق جارٍ. قراءة فائتة عند الخروج ليست خطأً يستحق انهياراً.
+        logger.debug(f"تعذّرت جدولة قراءة {path} (إغلاق جارٍ): {e}")
+        return None
 
 
 def read_int_bounded(path: Path, timeout: float = SYSFS_READ_TIMEOUT) -> Optional[int]:
@@ -133,6 +138,25 @@ class RemediationStep:
     params: Dict[str, object] = field(default_factory=dict)
     command: Optional[str] = None  # أمر يمكن نسخه، لا يُنفّذ تلقائياً
     url: Optional[str] = None
+
+
+def device_name(vendor: str, product: str) -> str:
+    """
+    اسم الجهاز المعروض، بلا تكرار المصنّع.
+
+    كثير من المصنّعين يضعون اسمهم في `product_name` أيضاً، فالجمع الساذج
+    يعطي «HP HP ZBook 15 G3». الدمج هنا مصدر واحد يستخدمه الشريط ونافذة
+    التعريف والتشخيص، حتى لا يُصلَح في موضع ويبقى في آخر.
+    """
+    vendor = (vendor or '').strip()
+    product = (product or '').strip()
+    if not vendor:
+        return product
+    if not product:
+        return vendor
+    if product.lower().startswith(vendor.lower()):
+        return product
+    return f'{vendor} {product}'
 
 
 @dataclass

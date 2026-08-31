@@ -96,6 +96,7 @@ a = Analysis(
         'hardware_capability',
         'battery_science',
         'diagnostics',
+        'dialogs',
         'monitor_thread',
         'charge_controller',
         'charge_control_advanced',
@@ -109,7 +110,7 @@ a = Analysis(
 
         # التحسين
         'battery_optimizer',
-        'battery_optimizer_ai',
+        'system_tuning',
         'auto_optimizer',
 
         # التشغيل ودورة الحياة

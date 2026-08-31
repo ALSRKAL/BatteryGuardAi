@@ -58,32 +58,65 @@ class TestSoundMapping:
 
 
 class TestThresholdAlerts:
+    """
+    المقارنة بمفتاح الترجمة لا بنصّ حرفي: الاختبار الذي يثبّت صياغة الرسالة
+    يفشل عند أول تحسين لغوي ويُخفي الفشل الحقيقي (تنبيه لم يُرسَل أصلاً).
+    """
+
     def test_critical_threshold_triggers(self, mgr, monkeypatch):
+        from i18n import t
         sent = {}
         monkeypatch.setattr(mgr, 'send_notification',
                             lambda **kw: sent.setdefault('title', kw['title']) or True)
         monkeypatch.setattr(mgr, 'start_reminder', lambda *a, **k: None)
         result = mgr.send_battery_threshold_alert(5, False, 100)
         assert result is True
-        assert 'حرج' in sent['title']
+        assert sent['title'] == t('alert.critical_title')
 
     def test_low_threshold_triggers(self, mgr, monkeypatch):
+        from i18n import t
         sent = {}
         monkeypatch.setattr(mgr, 'send_notification',
                             lambda **kw: sent.setdefault('title', kw['title']) or True)
         monkeypatch.setattr(mgr, 'start_reminder', lambda *a, **k: None)
         result = mgr.send_battery_threshold_alert(15, False, 100)
         assert result is True
-        assert 'منخفضة' in sent['title']
+        assert sent['title'] == t('alert.low_title')
 
     def test_full_charge_triggers(self, mgr, monkeypatch):
+        from i18n import t
         sent = {}
         monkeypatch.setattr(mgr, 'send_notification',
                             lambda **kw: sent.setdefault('title', kw['title']) or True)
         monkeypatch.setattr(mgr, 'start_reminder', lambda *a, **k: None)
         result = mgr.send_battery_threshold_alert(96, True, 100)
         assert result is True
-        assert 'اكتمل' in sent['title']
+        assert sent['title'] == t('alert.full_title')
+
+    def test_alert_texts_are_translated_not_hardcoded(self, mgr, monkeypatch):
+        """
+        كل عنوان ورسالة يجب أن يخرج من `i18n`: النص المكتوب داخل المنطق يبقى
+        عربياً في الواجهة الإنجليزية.
+        """
+        from i18n import t
+        captured = {}
+        monkeypatch.setattr(mgr, 'send_notification',
+                            lambda **kw: captured.update(kw) or True)
+        monkeypatch.setattr(mgr, 'start_reminder', lambda *a, **k: None)
+        mgr.send_battery_threshold_alert(5, False, 100)
+        assert captured['message'] == t('alert.critical_body', percent=5)
+        assert not captured['message'].startswith('alert.')
+
+    def test_reminder_carries_a_live_readout(self, mgr, monkeypatch):
+        """
+        التذكير يحمل قراءة منفصلة عن نصّه، فتُعرض كرقم كبير ولا تُدفن في سطر.
+        """
+        captured = {}
+        monkeypatch.setattr(mgr, 'send_notification', lambda **kw: True)
+        monkeypatch.setattr(mgr, 'start_reminder',
+                            lambda kind, cond, data, **k: captured.update(data))
+        mgr.send_battery_threshold_alert(7, False, 100)
+        assert captured['readout'] == '7%'
 
     def test_healthy_range_no_alert(self, mgr, monkeypatch):
         monkeypatch.setattr(mgr, 'send_notification', lambda **kw: True)

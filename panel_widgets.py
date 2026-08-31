@@ -19,8 +19,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import (QEasingCurve, QPointF, QRect, QRectF, Qt,
                           QVariantAnimation, pyqtSignal)
-from PyQt6.QtGui import (QColor, QFontMetrics, QPainter, QPainterPath, QPen,
-                         QPolygonF)
+from PyQt6.QtGui import (QColor, QPainter, QPainterPath, QPen, QPolygonF)
 from PyQt6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel,
                              QPushButton, QSizePolicy, QTextEdit, QVBoxLayout,
                              QWidget)
@@ -50,6 +49,91 @@ class _Plate(QFrame):
         super().__init__(parent)
         self.setProperty('role', role)
         self.setFrameShape(QFrame.Shape.NoFrame)
+
+
+# ═══════════════════════════════════════════════════════════
+# القسم القابل للطي
+# ═══════════════════════════════════════════════════════════
+
+class CollapsibleSection(_Plate):
+    """
+    صفيحة معنونة تُفتح بنقرة واحدة، ومطويّة افتراضياً.
+
+    وُلدت من مشكلة قابلة للقياس: كانت اللوحة تعرض نحو أربعين قراءة رقمية على
+    ستة مجالات، وأكثرها شرطة `—` معظم الوقت لأن العتاد لا يبلّغها أو التعلّم
+    لم يجمع عيّناته بعد. النتيجة أن المستخدم يبحث عن القراءة التي تهمّه بين
+    قراءات لا تعني له شيئاً.
+
+    القاعدة: ما يحتاجه المستخدم في كل جلسة يبقى ظاهراً، وما يحتاجه مرة في
+    الشهر يُطوى ولا يُحذف. الطيّ ليس إخفاءً: العنوان يبقى مقروءاً فيعرف
+    المستخدم أن التفصيل موجود وأين.
+    """
+
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, title: str, expanded: bool = False,
+                 parent: Optional[QWidget] = None):
+        super().__init__('plate', parent)
+        self._expanded = bool(expanded)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(theme.SPACE_4, theme.SPACE_3,
+                                 theme.SPACE_4, theme.SPACE_3)
+        outer.setSpacing(theme.SPACE_3)
+
+        self.header = QPushButton(title)
+        self.header.setProperty('role', 'quiet')
+        self.header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.header.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: none;
+                text-align: right;
+                padding: 0;
+                color: {theme.INK_DIM};
+                {theme.font_css(theme.SIZE_LABEL, 600)}
+            }}
+            QPushButton:hover {{ color: {theme.INK}; }}
+        """)
+        self.header.clicked.connect(self.toggle)
+        outer.addWidget(self.header)
+
+        self.body = QWidget()
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.setSpacing(theme.SPACE_3)
+        outer.addWidget(self.body)
+
+        self._title = title
+        self.body.setVisible(self._expanded)
+        self._refresh_header()
+
+    # ── الحالة ──────────────────────────────────────────────
+
+    def _refresh_header(self) -> None:
+        mark = '−' if self._expanded else '+'
+        self.header.setText(f'{mark}  {self._title}')
+
+    def toggle(self) -> None:
+        self.set_expanded(not self._expanded)
+
+    def set_expanded(self, expanded: bool) -> None:
+        expanded = bool(expanded)
+        if expanded == self._expanded:
+            return
+        self._expanded = expanded
+        self.body.setVisible(expanded)
+        self._refresh_header()
+        self.toggled.emit(expanded)
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def add(self, widget: QWidget) -> None:
+        self.body_layout.addWidget(widget)
+
+    def add_layout(self, layout) -> None:
+        self.body_layout.addLayout(layout)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -103,8 +187,8 @@ class EngravedRail(_Plate):
         layout.addLayout(tier_row)
 
     def set_device(self, vendor: str, product: str) -> None:
-        text = ' '.join(part for part in (vendor, product) if part).strip()
-        self.device_label.setText(text or '—')
+        from hardware_capability import device_name
+        self.device_label.setText(device_name(vendor, product) or '—')
 
     def set_verdict(self, text: str, band: str = 'low') -> None:
         self.verdict_label.setText(text)
@@ -224,6 +308,11 @@ class ResponsiveGrid(QWidget):
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._grid.setHorizontalSpacing(theme.SPACE_4)
         self._grid.setVerticalSpacing(theme.SPACE_2)
+        self._grid.setSizeConstraint(QGridLayout.SizeConstraint.SetMinimumSize)
+        # الارتفاع من المحتوى: بلا هذا تضغط اللوحة الأمّ الصفوف تحت ارتفاعها
+        # الأدنى ولا تُبلّغ Qt عن ذلك بأي خطأ، فيظهر التراكب كأنه خطأ تصميم.
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Minimum)
 
     def add(self, widget: QWidget) -> None:
         self._items.append(widget)
@@ -263,7 +352,10 @@ class _MeasureCell(QWidget):
     def __init__(self, icon_name: str, label: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._icon_name = icon_name
-        self.setFixedHeight(42)
+        # لا ارتفاع مثبّت: كان 42 بكسل يكفي سطرين بخط 11+14، لكن ورقة أنماط
+        # التطبيق تفرض 15px على كل QWidget وتتجاوز `setFont`، فيُقصّ سطر
+        # القيمة. الأحجام الآن من CSS (تفوز بالخصوصية) والارتفاع من المحتوى.
+        self.setMinimumHeight(46)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -278,11 +370,13 @@ class _MeasureCell(QWidget):
         text_column = QVBoxLayout()
         text_column.setSpacing(1)
         self.label = QLabel(label)
-        self.label.setFont(theme.legend_font(11))
-        self.label.setStyleSheet(f"color: rgba(242, 239, 230, 0.62);")
+        self.label.setStyleSheet(
+            theme.font_css(11, 600, tracking=theme.TRACKING_LEGEND)
+            + ' color: rgba(242, 239, 230, 0.62);')
         self.value = QLabel('—')
-        self.value.setFont(theme.font(theme.SIZE_LABEL, 700, mono=True))
-        self.value.setStyleSheet(f"color: {theme.INK_ON_FIELD};")
+        self.value.setStyleSheet(
+            theme.font_css(theme.SIZE_LABEL, 700, mono=True,
+                           color=theme.INK_ON_FIELD))
         text_column.addWidget(self.label)
         text_column.addWidget(self.value)
 
@@ -333,13 +427,15 @@ class StatePlate(QFrame):
         reading = QHBoxLayout()
         reading.setSpacing(theme.SPACE_2)
         self.value_label = QLabel('--')
-        self.value_label.setFont(theme.font(theme.SIZE_READOUT, 700, mono=True))
-        self.value_label.setStyleSheet(f"color: {theme.INK_ON_FIELD};")
+        self.value_label.setStyleSheet(
+            theme.font_css(theme.SIZE_READOUT, 700, mono=True,
+                           color=theme.INK_ON_FIELD))
         # عرض ثابت لثلاث خانات حتى لا يتحرك ما حوله عند تغيّر الرقم
         self.value_label.setMinimumWidth(int(theme.SIZE_READOUT * 2.0))
         self.unit_label = QLabel(t('unit.percent'))
-        self.unit_label.setFont(theme.legend_font(theme.SIZE_LABEL))
-        self.unit_label.setStyleSheet("color: rgba(242, 239, 230, 0.7);")
+        self.unit_label.setStyleSheet(
+            theme.font_css(theme.SIZE_LABEL, 600, tracking=theme.TRACKING_LEGEND)
+            + ' color: rgba(242, 239, 230, 0.7);')
         reading.addWidget(self.value_label, 0, Qt.AlignmentFlag.AlignBottom)
         reading.addWidget(self.unit_label, 0, Qt.AlignmentFlag.AlignBottom)
 
@@ -356,8 +452,8 @@ class StatePlate(QFrame):
         self.status_mark = QLabel()
         self.status_mark.setFixedWidth(18)
         self.status_label = QLabel(t('status.reading'))
-        self.status_label.setFont(theme.font(theme.SIZE_LABEL, 700))
-        self.status_label.setStyleSheet(f"color: {theme.INK_ON_FIELD};")
+        self.status_label.setStyleSheet(
+            theme.font_css(theme.SIZE_LABEL, 700, color=theme.INK_ON_FIELD))
         status_row.addWidget(self.status_mark)
         status_row.addWidget(self.status_label)
         status_row.addStretch(1)
@@ -365,7 +461,9 @@ class StatePlate(QFrame):
         reading_column.addStretch(1)
 
         top.addWidget(reading_host, 0, Qt.AlignmentFlag.AlignTop)
-        top.addStretch(1)
+        # لا فاصل مطاطي هنا: كان يقتسم العرض المتبقي مع شبكة القياسات (بنفس
+        # وزن التمدد) فتنزل الشبكة إلى عمود واحد بستة صفوف، ثم تُضغط الصفوف
+        # تحت ارتفاعها الأدنى فتتراكب التسميات على القيم. الشبكة تأخذ الباقي.
 
         # ── القياسات الثانوية: تتوزّع على أعمدة حسب العرض المتاح ──
         measures_grid = ResponsiveGrid(min_column_width=210, max_columns=3)
@@ -435,11 +533,15 @@ class StatePlate(QFrame):
         صريحة بحجم أصغر: شرطة يتيمة في مكان رقم ضخم تبدو خللاً لا معلومة.
         """
         if self._reporting:
-            self.value_label.setFont(theme.font(theme.SIZE_READOUT, 700, mono=True))
+            self.value_label.setStyleSheet(
+                theme.font_css(theme.SIZE_READOUT, 700, mono=True,
+                               color=theme.INK_ON_FIELD))
             self.value_label.setText(f"{int(round(self._shown_percent))}")
             self.unit_label.setVisible(True)
         else:
-            self.value_label.setFont(theme.font(theme.SIZE_READOUT_SM, 700))
+            self.value_label.setStyleSheet(
+                theme.font_css(theme.SIZE_READOUT_SM, 700,
+                               color=theme.INK_ON_FIELD))
             self.value_label.setText(t('status.no_signal'))
             self.unit_label.setVisible(False)
 

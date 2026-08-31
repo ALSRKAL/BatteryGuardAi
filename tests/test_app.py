@@ -105,9 +105,11 @@ class TestAppSmoke:
         from main_window import ModernUI
         window = ModernUI()
         try:
-            # خمسة مجالات مستقلة: الحالة، التحكم، التحليل، السجل، الإعدادات
-            expected = [t('tab.status'), t('tab.control'), t('tab.intelligence'),
-                        t('diag.title'), t('tab.record'), t('tab.settings')]
+            # أربعة مجالات: الحالة، التحكم، التفاصيل، الإعدادات.
+            # كانت ستة، وثلاثة منها لا تُفتح إلا عند سؤال محدد، فدُمجت في
+            # «التفاصيل» بأقسام تُفتح بالطلب.
+            expected = [t('tab.status'), t('tab.control'), t('tab.details'),
+                        t('tab.settings')]
             assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == expected
             assert window.monitor_thread is not None
             assert window.ai is not None
@@ -116,6 +118,17 @@ class TestAppSmoke:
             assert window.charge_window_jaw is not None
             assert window.capability_strip is not None
             assert window.diagnostics_panel is not None
+            # الأقسام المطويّة موجودة، والثانوي منها مطويّ عند البدء
+            assert set(window.details_sections) == {'analysis', 'record',
+                                                    'diagnostics'}
+            assert window.details_sections['record'].is_expanded() is False
+            assert window.details_sections['diagnostics'].is_expanded() is False
+            assert window.advanced_settings_section.is_expanded() is False
+            assert window.device_details_section.is_expanded() is False
+            # التنقّل يفتح القسم المطلوب لا صفحته فقط
+            window._open_details_section('record')
+            assert window.tabs.currentWidget() is window.details_tab
+            assert window.details_sections['record'].is_expanded() is True
         finally:
             window.ai_timer.stop()
             window.auto_save_timer.stop()

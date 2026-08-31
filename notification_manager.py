@@ -17,7 +17,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Optional
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
@@ -72,23 +72,26 @@ class DialogDispatcher(QObject):
     وسيُنشئ الحوار Qt على خيط الواجهة الرئيسي تلقائياً.
     """
 
-    show_interactive = pyqtSignal(str, str, str, str)  # title, message, urgency, reminder_type
+    #: title, message, urgency, reminder_type, readout
+    show_interactive = pyqtSignal(str, str, str, str, str)
 
     def __init__(self):
         super().__init__()
         self.active_dialogs = set()
         self.show_interactive.connect(self._on_show_interactive)
 
-    def request(self, title: str, message: str, urgency: str, reminder_type: str):
+    def request(self, title: str, message: str, urgency: str,
+                reminder_type: str, readout: str = ''):
         """طلب عرض حوار (آمن من أي خيط)"""
         from PyQt6.QtWidgets import QApplication
         if QApplication.instance() is None:
             return False
-        self.show_interactive.emit(title, message, urgency, reminder_type)
+        self.show_interactive.emit(title, message, urgency, reminder_type,
+                                   readout)
         return True
 
     def _on_show_interactive(self, title: str, message: str, urgency: str,
-                             reminder_type: str):
+                             reminder_type: str, readout: str = ''):
         """التنفيذ على الخيط الرئيسي"""
         if not INTERACTIVE_DIALOG_AVAILABLE:
             return
@@ -97,6 +100,7 @@ class DialogDispatcher(QObject):
             dialog = InteractiveNotificationDialog(
                 title=title, message=message,
                 reminder_type=reminder_type, urgency=urgency,
+                readout=readout,
             )
             dialog.stop_clicked.connect(manager.mute_reminder)
             dialog.snooze_clicked.connect(manager.snooze_reminder)
@@ -370,6 +374,7 @@ class SmartNotificationManager:
                 shown = self.dispatcher.request(
                     data['title'], data['message'],
                     data.get('urgency', 'normal'), reminder_type,
+                    data.get('readout', ''),
                 )
                 if shown and data.get('play_sound', True):
                     self.play_sound(self._get_sound_type(
@@ -631,72 +636,82 @@ class SmartNotificationManager:
 
     def send_battery_threshold_alert(self, current_percent: int, is_charging: bool,
                                      battery_health: int = 100) -> bool:
-        """تنبيه ذكي بناءً على حدود البطارية مع تذكيرات متكررة"""
+        """
+        تنبيه بناءً على حدود البطارية، مع تذكير متكرر ما بقي الشرط قائماً.
+
+        كل نص هنا يمرّ من `i18n`: كانت النصوص مكتوبة داخل هذا الملف بالعربية،
+        فبقيت عربية حتى في الواجهة الإنجليزية، وكانت النسبة تُثبَّت في رسالة
+        التذكير عند لحظة إنشائه فتُعرض قيمة قديمة بعد عشر دقائق.
+        """
+        from i18n import t as tr
         t = self.battery_thresholds
 
         if current_percent <= t['critical_low'] and not is_charging:
             self.send_notification(
-                title="تحذير حرج - البطارية منخفضة جداً!",
-                message=f"البطارية {current_percent}%! وصّل الشاحن فوراً لتجنب إيقاف الجهاز",
+                title=tr('alert.critical_title'),
+                message=tr('alert.critical_body', percent=current_percent),
                 urgency='critical', notification_type='battery_critical',
                 play_sound=True, persistent=True)
             self.start_reminder(
                 'battery_critical',
                 lambda: self._get_current_battery() <= t['critical_low'] and not self._is_charging(),
                 {
-                    'title': 'تحذير متكرر - البطارية حرجة!',
-                    'message': f'البطارية لا تزال {current_percent}%! وصّل الشاحن الآن!',
+                    'title': tr('alert.critical_reminder_title'),
+                    'message': tr('alert.critical_reminder_body'),
                     'urgency': 'critical',
                     'play_sound': True,
+                    'readout': f"{current_percent}%",
                 },
                 interval=self.reminder_intervals.get('battery_critical', 60))
             return True
 
         if current_percent <= t['low'] and not is_charging:
             self.send_notification(
-                title="بطارية منخفضة",
-                message=f"البطارية {current_percent}% - يُنصح بالشحن قريباً",
+                title=tr('alert.low_title'),
+                message=tr('alert.low_body', percent=current_percent),
                 urgency='normal', notification_type='battery_low', play_sound=True)
             self.start_reminder(
                 'battery_low',
                 lambda: self._get_current_battery() <= t['low'] and not self._is_charging(),
                 {
-                    'title': 'تذكير - البطارية منخفضة',
-                    'message': f'البطارية {current_percent}% - فكر في الشحن',
+                    'title': tr('alert.low_reminder_title'),
+                    'message': tr('alert.low_reminder_body'),
                     'urgency': 'normal',
                     'play_sound': False,
+                    'readout': f"{current_percent}%",
                 })
             return True
 
         if current_percent >= t['full'] and is_charging:
             self.send_notification(
-                title="اكتمل الشحن",
-                message=f"البطارية {current_percent}% - يمكن فصل الشاحن لحماية البطارية",
+                title=tr('alert.full_title'),
+                message=tr('alert.full_body', percent=current_percent),
                 urgency='low', notification_type='charge_complete', play_sound=True)
             if self.smart_alerts['charger_disconnect_reminder']:
                 self.start_reminder(
                     'unplug_charger',
                     lambda: self._get_current_battery() >= t['full'] and self._is_charging(),
                     {
-                        'title': 'تذكير - فصل الشاحن',
-                        'message': f'البطارية ممتلئة {current_percent}% - افصل الشاحن لحماية البطارية',
+                        'title': tr('alert.unplug_reminder_title'),
+                        'message': tr('alert.unplug_reminder_body'),
                         'urgency': 'normal',
                         'play_sound': True,
+                        'readout': f"{current_percent}%",
                     })
             return True
 
         if (t['optimal_min'] <= current_percent <= t['optimal_max']
                 and is_charging and self.smart_alerts['optimal_charge_reminder']):
             self.send_notification(
-                title="الشحن الأمثل",
-                message=f"البطارية {current_percent}% - في النطاق الأمثل للصحة",
+                title=tr('alert.optimal_title'),
+                message=tr('alert.optimal_body', percent=current_percent),
                 urgency='low', notification_type='optimal_charge', play_sound=False)
             return True
 
         if battery_health < 80 and self.smart_alerts['health_warnings']:
             self.send_notification(
-                title="تحذير صحة البطارية",
-                message=f"صحة البطارية {battery_health}% - تجنب الشحن الكامل والتفريغ العميق",
+                title=tr('alert.health_title'),
+                message=tr('alert.health_body', health=battery_health),
                 urgency='normal', notification_type='health_warning', play_sound=True)
             return True
 
@@ -705,36 +720,33 @@ class SmartNotificationManager:
     def send_charger_status_alert(self, was_charging: bool, is_charging: bool,
                                   battery_percent: int):
         """تنبيه تغيّر حالة الشاحن"""
+        from i18n import t as tr
         t = self.battery_thresholds
 
         if was_charging and not is_charging:
-            if battery_percent < t['optimal_min']:
-                self.send_notification(
-                    title="تم فصل الشاحن",
-                    message=f"البطارية {battery_percent}% - أقل من المستوى الأمثل",
-                    urgency='normal', notification_type='charger_disconnected',
-                    play_sound=True)
-            else:
-                self.send_notification(
-                    title="تم فصل الشاحن",
-                    message=f"البطارية {battery_percent}% - مستوى جيد",
-                    urgency='low', notification_type='charger_disconnected',
-                    play_sound=False)
+            below = battery_percent < t['optimal_min']
+            self.send_notification(
+                title=tr('alert.unplugged_title'),
+                message=tr('alert.unplugged_low' if below else 'alert.unplugged_ok',
+                           percent=battery_percent),
+                urgency='normal' if below else 'low',
+                notification_type='charger_disconnected',
+                play_sound=below)
 
         elif not was_charging and is_charging:
             if battery_percent <= t['critical_low']:
                 self.send_notification(
-                    title="تم توصيل الشاحن",
-                    message=f"البطارية {battery_percent}% - شحن سريع مطلوب",
+                    title=tr('alert.plugged_title'),
+                    message=tr('alert.plugged_critical', percent=battery_percent),
                     urgency='normal', notification_type='charger_connected',
                     play_sound=True)
-                # إيقاف تذكيرات البطارية المنخفضة
+                # الشاحن وُصل: التذكيرات التي كانت تطلب وصله لم يبق لها سبب
                 self.stop_reminder('battery_critical')
                 self.stop_reminder('battery_low')
             else:
                 self.send_notification(
-                    title="بدء الشحن",
-                    message=f"البطارية {battery_percent}% - جارٍ الشحن",
+                    title=tr('alert.plugged_title'),
+                    message=tr('alert.plugged_ok', percent=battery_percent),
                     urgency='low', notification_type='charger_connected',
                     play_sound=False)
 

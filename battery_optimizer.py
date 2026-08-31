@@ -1,706 +1,491 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""محسّن البطارية الذكي - تحسين الأداء وتوفير الطاقة"""
+"""
+محسّن الطاقة - BatteryGuardAI
 
-import sys
-import os
-import logging
-import subprocess
-import psutil
+الإصدار السابق من هذا الملف أعطب أجهزة مستخدمين: كان يرفع السطوع إلى قيمة
+يختارها بنفسه بعد أن ينزله المستخدم، ويعلّق كل أجهزة USB فتسقط محطة الإرساء
+والشاشة الموصولة بها، ويكتب على `card0` الذي لا وجود له على كثير من الأجهزة،
+ويترك البلوتوث محجوباً و`swappiness` مغيّراً بلا طريق رجوع، ثم يعلن «توفير
+15٪» وهو رقم ثابت مكتوب في الشيفرة لا قياس.
+
+هذا الإصدار مبني على عقد مختلف:
+
+| المبدأ | التطبيق |
+|---|---|
+| لا تغيير بلا طريق رجوع | كل إجراء يلتقط الأصل في لقطة دائمة (`system_tuning`) |
+| لا رقم بلا قياس | التوفير يُقرأ من العتاد قبل وبعد، أو يُعلَن «غير مقيس» |
+| الامتناع نتيجة معلنة | ما لم يُنفَّذ يظهر بسببه، لا يُخفى ولا يُزعم نجاحه |
+| لا صلاحيات لما لا يحتاجها | السطوع عبر مسار الجلسة المصرّح به، بلا كلمة مرور |
+| الشاشة الخارجية خط أحمر | إجراءات الرسوم تُلغى كلها عند وجود شاشة موصولة |
+
+ما حُذف نهائياً ولا يعود، لأن ضرره مثبت ومكسبه غير مثبت:
+`for i in /sys/bus/usb/devices/*/power/control; do echo auto` (يفصل الإرساء
+ولوحة المفاتيح)، `rfkill block bluetooth` (يقطع الفأرة ولا يُستعاد)،
+`echo low > power_dpm_force_performance_level` و`echo auto > card0/device/
+power/control` (يسقطان الشاشة الخارجية)، `echo 3 > drop_caches` (يُجبر
+النظام على إعادة القراءة من القرص فيستهلك أكثر)، `echo 10 > swappiness`
+و`echo noop > /sys/block/sda/queue/scheduler` (تغيير دائم في النواة على قرص
+مفترض بمجدول لم يعد موجوداً في النوى الحديثة).
+"""
+
+from __future__ import annotations
+
 import gc
+import logging
+import sys
 import threading
 import time
-from pathlib import Path
-from typing import Dict, List, Tuple
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+import psutil
+
+from i18n import t
+from system_tuning import SafeTuner, graphics_tuning_allowed, usb_tuning_allowed
+
+logger = logging.getLogger('BatteryGuard')
 
 IS_WINDOWS = sys.platform == 'win32'
 IS_LINUX = sys.platform.startswith('linux')
 
-logger = logging.getLogger('BatteryGuard')
+# ═══════════════════════════════════════════════════════════
+# ثوابت معلنة
+# ═══════════════════════════════════════════════════════════
+
+#: أدنى نسبة معالج تجعل عملية مرشحة لخفض أولوية الإدخال/الإخراج.
+#: القيمة عالية عن قصد: خفض أولوية عملية تعمل قليلاً لا يوفّر شيئاً ويضرّ.
+THROTTLE_CPU_PERCENT = 25.0
+
+#: أقصى عدد عمليات تُخفض أولويتها في جولة واحدة
+THROTTLE_MAX_PROCESSES = 5
+
+#: مهلة قياس السحب قبل/بعد (ثانية): أقصر من هذا يقرأ ضجيجاً لا فرقاً
+MEASURE_SETTLE_SECONDS = 2.0
+
+#: أوضاع التحسين المقبولة. `basic` و`intelligent` تبقى للتوافق مع النداءات
+#: القديمة وتُخطَّط إلى نفس السلوك الآمن: الوضع لم يكن يوماً سبباً كافياً
+#: لإجراء أخطر.
+KNOWN_MODES = frozenset({'basic', 'advanced', 'intelligent', 'balanced', 'saver'})
 
 
-def run_with_sudo(command: List[str], password: str = None) -> Tuple[bool, str]:
-    """تشغيل أمر مع صلاحيات sudo"""
-    try:
-        if IS_LINUX and password:
-            # استخدام sudo مع كلمة المرور
-            sudo_cmd = ['sudo', '-S'] + command
-            process = subprocess.Popen(
-                sudo_cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            stdout, stderr = process.communicate(input=f"{password}\n", timeout=10)
-            return process.returncode == 0, stdout + stderr
-        else:
-            # تشغيل عادي
-            result = subprocess.run(command, capture_output=True, text=True, timeout=10)
-            return result.returncode == 0, result.stdout + result.stderr
-    except Exception as e:
-        return False, str(e)
+# ═══════════════════════════════════════════════════════════
+# نتيجة إجراء واحد
+# ═══════════════════════════════════════════════════════════
 
+@dataclass
+class ActionReport:
+    """
+    نتيجة إجراء واحد بصيغة تفهمها الواجهة.
+
+    `success` تعني «نُفّذ فعلاً»، و`declined` تعني «امتنعنا وهذا سببه».
+    لا حالة ثالثة تُعرض كنجاح وهي ليست كذلك.
+    """
+
+    key: str
+    success: bool = False
+    declined: bool = False
+    reason: str = ''
+    detail: str = ''
+    reversible: bool = True
+    measured_watts: Optional[float] = None
+
+    @property
+    def name(self) -> str:
+        return t(f'opt.action.{self.key}')
+
+    def as_dict(self) -> Dict:
+        return {
+            'key': self.key,
+            'name': self.name,
+            'success': self.success,
+            'declined': self.declined,
+            'reason': self.reason,
+            'details': self.detail,
+            'reversible': self.reversible,
+            'measured_watts': self.measured_watts,
+            # التوافق مع القارئ القديم: لا رقم مختلَق، صفر حتى يُقاس
+            'power_saved': self.measured_watts or 0.0,
+        }
+
+
+# ═══════════════════════════════════════════════════════════
+# المحسّن
+# ═══════════════════════════════════════════════════════════
 
 class BatteryOptimizer:
-    """محسّن البطارية الذكي المتقدم مع الذكاء الاصطناعي"""
-    
-    def __init__(self, ai_engine=None):
-        self.optimization_history = []
+    """
+    يقلّل السحب بإجراءات قابلة للتراجع، ويقيس أثرها من العتاد، ويقول ما
+    امتنع عنه ولماذا.
+    """
+
+    def __init__(self, ai_engine=None, monitor=None,
+                 tuner: Optional[SafeTuner] = None):
+        self.ai_engine = ai_engine
+        #: مصدر قراءة القدرة لقياس الأثر (اختياري: بلا قياس نقول ذلك)
+        self.monitor = monitor
+        self.tuner = tuner or SafeTuner()
+
         self.is_optimizing = False
         self._optimizing_lock = threading.Lock()
-        self.sudo_password = None
-        self.ai_engine = ai_engine
-        self.smart_optimization_enabled = True
-        self.optimization_level = 'intelligent'  # basic, advanced, intelligent
-        self.learning_data = {}
-        self.optimization_patterns = []
-        self.success_rate = 100
+
+        #: يبقى للتوافق مع `_sync_permissions`. لا إجراء في هذا الملف
+        #: يستخدمه: كل ما نفعله متاح لمالك الجلسة بلا رفع صلاحيات.
+        self.sudo_password: Optional[str] = None
+
+        self.optimization_history: List[Dict] = []
         self.total_optimizations = 0
-        self.power_saved_total = 0
-        
-        # تحميل امتدادات الذكاء الاصطناعي
-        try:
-            from battery_optimizer_ai import AIOptimizerExtensions
-            self.ai_extensions = AIOptimizerExtensions(self, ai_engine)
-        except ImportError:
-            self.ai_extensions = None
-        
-    def set_sudo_password(self, password: str):
-        """تعيين كلمة مرور sudo"""
+        self.power_saved_total = 0.0
+        self.success_rate = 100
+
+        #: العمليات التي خُفضت أولويتها في هذه الجلسة، لاستعادتها
+        self._throttled: Dict[int, Tuple[int, int]] = {}
+        self._safety_gate = None
+
+    # ── التوافق مع الطبقات الأعلى ───────────────────────────
+
+    def set_sudo_password(self, password: Optional[str]) -> None:
+        """
+        يُستدعى من مزامنة الصلاحيات. نحفظه ولا نستخدمه: أي إجراء يحتاج
+        كلمة مرور المستخدم لضبط سطوع شاشته إجراء مصمَّم خطأً.
+        """
         self.sudo_password = password
-    
-    def optimize_battery(self, use_cached_password: bool = True, optimization_mode: str = 'intelligent') -> Dict:
-        """تحسين شامل ذكي للبطارية مع الذكاء الاصطناعي"""
-        # حماية ذرية ضد سباق النقر اليدوي مع المحسن التلقائي
+
+    @property
+    def safety_gate(self):
+        """بوابة سلامة العمليات نفسها التي يستخدمها الحارس، لا نسخة ثانية"""
+        if self._safety_gate is None:
+            from guard_actions import SafetyGate
+            self._safety_gate = SafetyGate()
+        return self._safety_gate
+
+    # ── القياس ──────────────────────────────────────────────
+
+    def _read_draw_watts(self) -> Optional[float]:
+        """سحب القدرة الآن بالواط، أو None إذا لم يوفّره العتاد"""
+        if self.monitor is None:
+            return None
+        try:
+            status = self.monitor.get_battery_status()
+        except Exception as e:  # pragma: no cover - عتاد لا يستجيب
+            logger.debug(f"محسّن: تعذّرت قراءة القدرة: {e}")
+            return None
+        if not isinstance(status, dict):
+            return None
+        for key in ('power_draw', 'power_now', 'draw_watts'):
+            value = status.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                return float(value)
+        return None
+
+    def get_system_status(self) -> Dict:
+        """حالة النظام الآن: قياسات فقط، بلا درجات مركّبة"""
+        status: Dict = {}
+        try:
+            status['cpu_percent'] = psutil.cpu_percent(interval=None)
+            status['memory_percent'] = psutil.virtual_memory().percent
+            status['process_count'] = len(psutil.pids())
+        except Exception as e:
+            logger.debug(f"محسّن: تعذّرت قراءة حالة النظام: {e}")
+
+        try:
+            battery = psutil.sensors_battery()
+            if battery is not None:
+                status['battery_percent'] = int(battery.percent)
+                status['is_charging'] = bool(battery.power_plugged)
+        except Exception:
+            pass
+
+        draw = self._read_draw_watts()
+        if draw is not None:
+            status['power_draw'] = draw
+        status['displays'] = self.tuner.displays().as_dict()
+        return status
+
+    def capabilities(self) -> Dict:
+        """ما يمكن فعله على هذا الجهاز فعلاً (تعرضه الواجهة قبل أي زر)"""
+        return self.tuner.capabilities()
+
+    # ── الإجراءات ───────────────────────────────────────────
+
+    #: أسباب الامتناع المعروفة التي تملك مفتاح ترجمة. ما عداها يُعرض بنصّه
+    #: الخام داخل رسالة عامة: مفتاح مفقود أسوأ من سبب غير مترجم.
+    KNOWN_REASONS = frozenset({
+        'no_internal_panel', 'already_at_floor', 'no_headroom',
+        'no_greedy_process', 'all_denied', 'scan_failed',
+        'external_display_connected', 'displays_unreadable',
+    })
+
+    @classmethod
+    def _reason_text(cls, reason: str) -> str:
+        """نص سبب الامتناع: مترجم إن كان معروفاً، وصادق إن لم يكن"""
+        if not reason:
+            return ''
+        if reason in cls.KNOWN_REASONS:
+            return t(f'opt.reason.{reason}')
+        return t('opt.reason.blocked_by_system', detail=reason)
+
+    def _dim_panel(self) -> ActionReport:
+        """خفض سطوع اللوحة الداخلية درجة واحدة، بلقطة قابلة للاستعادة"""
+        panels_before = self.tuner.internal_backlights()
+        before = panels_before[0].percent if panels_before else None
+
+        result = self.tuner.dim_internal_panel()
+
+        if not result.applied:
+            return ActionReport('dim_panel', declined=True, reason=result.reason,
+                                detail=self._reason_text(result.reason))
+
+        panels_after = self.tuner.internal_backlights()
+        after = panels_after[0].percent if panels_after else None
+        return ActionReport(
+            'dim_panel', success=True, reversible=True,
+            detail=t('opt.detail.dimmed', before=before, after=after))
+
+    def _throttle_greedy_processes(self) -> ActionReport:
+        """
+        خفض أولوية الإدخال/الإخراج للعمليات الشرِهة إلى الصنف الخامل.
+
+        قابل للتراجع تماماً، ولا يلمس أولوية المعالج: `renice` لا يُستعاد بلا
+        صلاحيات على معظم التوزيعات، فخفضه من مسار تلقائي تغيير دائم بلا إذن.
+        كل عملية تمرّ من بوابة سلامة الحارس: لا نظام، لا خيوط نواة، لا
+        مستخدم آخر، لا أسلاف التطبيق ولا ذرّيته.
+        """
+        candidates: List[Tuple[float, psutil.Process]] = []
+        try:
+            for process in psutil.process_iter(['pid', 'name', 'cpu_percent']):
+                cpu = process.info.get('cpu_percent') or 0.0
+                if cpu < THROTTLE_CPU_PERCENT:
+                    continue
+                verdict = self.safety_gate.check(process.info['pid'],
+                                                 process.info.get('name') or '')
+                if not verdict.allowed:
+                    continue
+                candidates.append((cpu, process))
+        except Exception as e:
+            return ActionReport('throttle', declined=True, reason='scan_failed',
+                                detail=str(e))
+
+        if not candidates:
+            return ActionReport('throttle', declined=True, reason='no_greedy_process',
+                                detail=t('opt.reason.no_greedy_process'))
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        names: List[str] = []
+        for _, process in candidates[:THROTTLE_MAX_PROCESSES]:
+            try:
+                if not hasattr(process, 'ionice'):
+                    continue
+                current = process.ionice()
+                if process.pid not in self._throttled:
+                    self._throttled[process.pid] = (
+                        int(getattr(current, 'ioclass', current)),
+                        int(getattr(current, 'value', 0)))
+                process.ionice(psutil.IOPRIO_CLASS_IDLE)
+                names.append(process.name())
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            except (OSError, ValueError) as e:
+                logger.debug(f"محسّن: تعذّر خفض أولوية {process.pid}: {e}")
+
+        if not names:
+            return ActionReport('throttle', declined=True, reason='all_denied',
+                                detail=t('opt.reason.all_denied'))
+        return ActionReport('throttle', success=True, reversible=True,
+                            detail=t('opt.detail.throttled',
+                                     count=len(names), names=t('unit.list_separator').join(names[:3])))
+
+    def _release_own_memory(self) -> ActionReport:
+        """
+        تحرير ذاكرة التطبيق نفسه.
+
+        الإصدار السابق كان يكتب `3` في `drop_caches` ويسمّيه «تنظيف الذاكرة
+        بالكامل». إفراغ ذاكرة القرص المخبّأة يُجبر النظام على إعادة القراءة
+        من القرص، والقرص من أكبر مستهلكي الطاقة: كان يزيد السحب لا يقلّله.
+        ما يبقى صحيحاً هو تحرير ذاكرة هذه العملية فقط، وهذا حجمه المعلن.
+        """
+        before = 0.0
+        try:
+            before = psutil.Process().memory_info().rss / (1024 * 1024)
+        except Exception:
+            pass
+        collected = gc.collect()
+        after = before
+        try:
+            after = psutil.Process().memory_info().rss / (1024 * 1024)
+        except Exception:
+            pass
+        freed = max(0.0, before - after)
+        return ActionReport('own_memory', success=True, reversible=True,
+                            detail=t('opt.detail.own_memory',
+                                     objects=collected, freed=f'{freed:.1f}'))
+
+    def _declared_refusals(self) -> List[ActionReport]:
+        """
+        ما امتنع عنه التطبيق صراحةً. يُعرض للمستخدم دائماً: تطبيق يخفي
+        امتناعه يبدو أقوى مما هو، وذلك أسوأ من أن يبدو أضعف.
+        """
+        displays = self.tuner.displays()
+        refusals: List[ActionReport] = []
+
+        graphics_ok, graphics_reason = graphics_tuning_allowed(displays)
+        if not graphics_ok:
+            refusals.append(ActionReport(
+                'graphics', declined=True, reason=graphics_reason,
+                detail=t(f'opt.reason.{graphics_reason}')))
+
+        _, usb_reason = usb_tuning_allowed(displays)
+        refusals.append(ActionReport('usb', declined=True, reason=usb_reason,
+                                     detail=t('opt.reason.usb_unsafe')))
+        refusals.append(ActionReport('radio', declined=True, reason='needs_consent',
+                                     detail=t('opt.reason.radio_needs_consent')))
+        refusals.append(ActionReport('kernel', declined=True, reason='not_reversible',
+                                     detail=t('opt.reason.kernel_not_reversible')))
+        return refusals
+
+    # ── الجولة الكاملة ──────────────────────────────────────
+
+    def optimize_battery(self, use_cached_password: bool = True,
+                         optimization_mode: str = 'balanced') -> Dict:
+        """
+        جولة تحسين واحدة.
+
+        `use_cached_password` و`optimization_mode` يبقيان في التوقيع للتوافق
+        مع النداءات القائمة. الأول لا أثر له لأن لا إجراء يحتاج صلاحيات،
+        والثاني لا يغيّر خطورة ما يُنفَّذ: كل الأوضاع تُنفّذ الإجراءات الآمنة
+        نفسها. الوضع الخطر لم يكن ميزة بل عطلاً.
+        """
         with self._optimizing_lock:
             if self.is_optimizing:
-                return {'success': False, 'message': 'التحسين قيد التنفيذ بالفعل'}
+                return {'success': False, 'actions': [], 'errors': [],
+                        'power_saved': 0.0,
+                        'message': t('opt.already_running')}
             self.is_optimizing = True
-        
-        self.total_optimizations += 1
-        
-        results = {
-            'success': True,
-            'actions': [],
-            'errors': [],
-            'power_saved': 0,
-            'ai_recommendations': [],
-            'optimization_level': optimization_mode,
-            'intelligence_score': 0,
-            'predicted_improvement': 0,
-            'personalized_actions': []
-        }
-        
+
+        if optimization_mode not in KNOWN_MODES:
+            optimization_mode = 'balanced'
+
+        started = time.time()
+        draw_before = self._read_draw_watts()
+        reports: List[ActionReport] = []
+        errors: List[str] = []
+
         try:
-            # التحليل الذكي قبل التحسين
-            if self.ai_engine and optimization_mode == 'intelligent':
-                ai_analysis = self._perform_ai_analysis()
-                results['ai_recommendations'] = ai_analysis.get('recommendations', [])
-                results['predicted_improvement'] = ai_analysis.get('predicted_improvement', 0)
-                results['intelligence_score'] = ai_analysis.get('intelligence_score', 0)
-                
-                # الحصول على توصيات التحسين الذكية
-                battery_status = self.get_system_status()
-                current_battery = battery_status.get('battery_percent', 50)
-                is_charging = battery_status.get('is_charging', False)
-                
-                if hasattr(self.ai_engine, 'get_optimization_recommendations'):
-                    smart_recs = self.ai_engine.get_optimization_recommendations(current_battery, is_charging)
-                    results['ai_recommendations'].extend(smart_recs[:3])  # إضافة أول 3 توصيات
-            
-            # 1. تنظيف الذاكرة الذكي
-            if self.ai_extensions and optimization_mode == 'intelligent':
-                memory_result = self.ai_extensions.clean_memory_intelligent()
-            else:
-                memory_result = self._clean_memory()
-            results['actions'].append(memory_result)
-            
-            # 2. تحسين العمليات بالذكاء الاصطناعي
-            if self.ai_extensions and optimization_mode == 'intelligent':
-                process_result = self.ai_extensions.optimize_processes_ai()
-            else:
-                process_result = self._optimize_processes()
-            results['actions'].append(process_result)
-            
-            # 3. تحسين إعدادات الطاقة الذكي
-            if self.ai_extensions and optimization_mode == 'intelligent':
-                power_result = self.ai_extensions.optimize_power_settings_intelligent()
-            else:
-                power_result = self._optimize_power_settings()
-            results['actions'].append(power_result)
-            
-            # 4. تنظيف الملفات المؤقتة الذكي
-            if optimization_mode == 'intelligent':
-                temp_result = self._clean_temp_files_smart()
-            else:
-                temp_result = self._clean_temp_files()
-            results['actions'].append(temp_result)
-            
-            # 5. تحسين الشبكة الذكي
-            if optimization_mode == 'intelligent':
-                network_result = self._optimize_network_ai()
-            else:
-                network_result = self._optimize_network()
-            results['actions'].append(network_result)
-            
-            # 6. تحسين القرص الذكي
-            if optimization_mode == 'intelligent':
-                disk_result = self._optimize_disk_intelligent()
-            else:
-                disk_result = self._optimize_disk()
-            results['actions'].append(disk_result)
-            
-            # تحسينات متقدمة بالذكاء الاصطناعي
-            if optimization_mode == 'intelligent':
-                # 7. تحسين GPU والرسوميات
-                if self.ai_extensions:
-                    gpu_result = self.ai_extensions.optimize_gpu_ai()
-                else:
-                    gpu_result = {'name': 'تحسين GPU', 'success': True, 'details': 'تم تحسين GPU الأساسي', 'power_saved': 5}
-                results['actions'].append(gpu_result)
-                
-                # 8. تحسين الخدمات والبرامج
-                services_result = {'name': 'تحسين الخدمات', 'success': True, 'details': 'تم تحسين الخدمات الأساسية', 'power_saved': 4}
-                results['actions'].append(services_result)
-                
-                # 9. تحسين الأجهزة الطرفية
-                peripherals_result = {'name': 'تحسين الأجهزة الطرفية', 'success': True, 'details': 'تم تحسين الأجهزة الطرفية', 'power_saved': 3}
-                results['actions'].append(peripherals_result)
-                
-                # 10. تحسين نظام التشغيل
-                os_result = {'name': 'تحسين نظام التشغيل', 'success': True, 'details': 'تم تحسين إعدادات النظام', 'power_saved': 5}
-                results['actions'].append(os_result)
-            
-            # حساب الطاقة الموفرة الإجمالية
-            total_saved = sum(a.get('power_saved', 0) for a in results['actions'])
-            results['power_saved'] = total_saved
-            self.power_saved_total += total_saved
-            
-            # التحسينات الشخصية بناءً على الذكاء الاصطناعي
-            if optimization_mode == 'intelligent':
-                if self.ai_extensions:
-                    personalized = self.ai_extensions.apply_personalized_optimizations()
-                else:
-                    personalized = self._apply_personalized_optimizations()
-                results['personalized_actions'] = personalized
-                results['power_saved'] += sum(p.get('power_saved', 0) for p in personalized)
-            
-            # تسجيل النتائج للتعلم
-            self._record_optimization_results(results)
-            
-            # حساب معدل النجاح
-            if results['success']:
-                self.success_rate = min(100, self.success_rate + 1)
-            else:
-                self.success_rate = max(0, self.success_rate - 2)
-            
-        except Exception as e:
-            logger.error(f"خطأ في التحسين الذكي: {e}")
-            results['success'] = False
-            results['errors'].append(str(e))
-            self.success_rate = max(0, self.success_rate - 5)
-        finally:
-            self.is_optimizing = False
-        
-        return results
-    
-    def _clean_memory(self) -> Dict:
-        """تنظيف الذاكرة والكاش - فعّال جداً"""
-        result = {'name': 'تنظيف الذاكرة', 'success': False, 'details': '', 'power_saved': 0}
-        
-        try:
-            memory_before = psutil.virtual_memory().percent
-            
-            # تنظيف Python garbage collector أولاً
-            gc.collect()
-            
-            if IS_LINUX:
-                # تنظيف الكاش في Linux
+            for step in (self._dim_panel, self._throttle_greedy_processes,
+                         self._release_own_memory):
                 try:
-                    # sync لكتابة البيانات المعلقة
-                    subprocess.run(['sync'], check=False, timeout=5)
-                    
-                    # تنظيف page cache و dentries و inodes
-                    if self.sudo_password:
-                        success, output = run_with_sudo(
-                            ['sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches'],
-                            self.sudo_password
-                        )
-                        if success:
-                            result['details'] = 'تم تنظيف الكاش والذاكرة بالكامل'
-                        else:
-                            result['details'] = 'تم تنظيف الذاكرة الأساسية'
-                    else:
-                        # تنظيف بدون sudo
-                        result['details'] = 'تم تنظيف الذاكرة الأساسية'
+                    reports.append(step())
                 except Exception as e:
-                    result['details'] = f'تم تنظيف الذاكرة الأساسية'
-            
-            elif IS_WINDOWS:
-                # تنظيف الذاكرة في Windows - فعّال
-                try:
-                    # تنظيف .NET garbage collector
-                    subprocess.run(['powershell', '-Command', 
-                                  '[System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers(); [System.GC]::Collect()'],
-                                 check=False, capture_output=True, timeout=10)
-                    
-                    # تنظيف working set للعمليات
-                    subprocess.run(['powershell', '-Command',
-                                  'Get-Process | ForEach-Object { $_.WorkingSet = 0 }'],
-                                 check=False, capture_output=True, timeout=10)
-                    
-                    result['details'] = 'تم تنظيف الذاكرة والكاش بالكامل'
-                except:
-                    result['details'] = 'تم تنظيف الذاكرة الأساسية'
-            
-            # قياس التحسين
-            import time
-            time.sleep(1)
-            memory_after = psutil.virtual_memory().percent
-            freed = max(0, memory_before - memory_after)
-            
-            if freed > 0:
-                result['details'] += f' (تحرير {freed:.1f}%)'
-                result['power_saved'] = freed * 0.8  # توفير فعلي
-            else:
-                result['power_saved'] = 5  # توفير افتراضي
-            
-            result['success'] = True
-            
-        except Exception as e:
-            result['details'] = f'خطأ: {str(e)}'
-            logger.error(f"خطأ في تنظيف الذاكرة: {e}")
-        
-        return result
-    
-    def _optimize_processes(self) -> Dict:
-        """تحسين العمليات وإيقاف غير الضرورية"""
-        result = {'name': 'تحسين العمليات', 'success': False, 'details': '', 'power_saved': 0}
-        
-        try:
-            # قائمة العمليات التي يمكن إيقافها بأمان
-            unnecessary_processes = [
-                'chrome.exe', 'firefox.exe', 'edge.exe',  # متصفحات في الخلفية
-                'spotify.exe', 'discord.exe', 'slack.exe',  # تطبيقات اجتماعية
-                'steam.exe', 'epicgameslauncher.exe',  # منصات ألعاب
-                'onedrive.exe', 'dropbox.exe',  # خدمات سحابية
-            ]
-            
-            stopped_count = 0
-            cpu_saved = 0
-            
-            for proc in psutil.process_iter(['name', 'cpu_percent', 'memory_percent']):
-                try:
-                    proc_name = proc.info['name'].lower()
-                    
-                    # تحديد العمليات ذات الاستهلاك العالي
-                    if proc.info['cpu_percent'] > 50 or proc.info['memory_percent'] > 30:
-                        # لا نوقف العمليات الحرجة
-                        if any(critical in proc_name for critical in ['system', 'kernel', 'init', 'systemd']):
-                            continue
-                        
-                        # خفض الأولوية بدلاً من الإيقاف
-                        try:
-                            proc.nice(psutil.IDLE_PRIORITY_CLASS if IS_WINDOWS else 19)
-                            cpu_saved += proc.info['cpu_percent']
-                        except:
-                            pass
-                
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-            
-            result['details'] = f'تم تحسين أولويات العمليات'
-            if cpu_saved > 0:
-                result['details'] += f' (توفير {cpu_saved:.1f}% CPU)'
-                result['power_saved'] = cpu_saved * 0.3
-            
-            result['success'] = True
-            
-        except Exception as e:
-            result['details'] = f'خطأ: {str(e)}'
-            logger.error(f"خطأ في تحسين العمليات: {e}")
-        
-        return result
-    
-    def _optimize_power_settings(self) -> Dict:
-        """تحسين إعدادات الطاقة - فعّال جداً"""
-        result = {'name': 'إعدادات الطاقة', 'success': False, 'details': '', 'power_saved': 0}
-        
-        try:
-            if IS_LINUX:
-                actions = []
-                power_saved = 0
-                
-                # 1. تفعيل CPU governor للتوفير
-                try:
-                    if self.sudo_password:
-                        success, _ = run_with_sudo(
-                            ['cpupower', 'frequency-set', '-g', 'powersave'],
-                            self.sudo_password
-                        )
-                        if success:
-                            actions.append('CPU powersave')
-                            power_saved += 10
-                except:
-                    pass
-                
-                # 2. خفض سطوع الشاشة
-                try:
-                    brightness_path = Path('/sys/class/backlight')
-                    if brightness_path.exists():
-                        for device in brightness_path.iterdir():
-                            brightness_file = device / 'brightness'
-                            max_brightness_file = device / 'max_brightness'
-                            if brightness_file.exists() and max_brightness_file.exists():
-                                try:
-                                    max_bright = int(max_brightness_file.read_text().strip())
-                                    optimal_bright = int(max_bright * 0.5)  # 50% سطوع
-                                    
-                                    if self.sudo_password:
-                                        success, _ = run_with_sudo(
-                                            ['sh', '-c', f'echo {optimal_bright} > {brightness_file}'],
-                                            self.sudo_password
-                                        )
-                                        if success:
-                                            actions.append('خفض السطوع')
-                                            power_saved += 8
-                                except:
-                                    pass
-                except:
-                    pass
-                
-                # 3. تعطيل Bluetooth و WiFi إذا لم يكن مستخدماً
-                try:
-                    if self.sudo_password:
-                        # تحقق من استخدام WiFi
-                        net_stats = psutil.net_io_counters()
-                        if net_stats.bytes_sent < 1000 and net_stats.bytes_recv < 1000:
-                            # WiFi غير مستخدم
-                            success, _ = run_with_sudo(['rfkill', 'block', 'bluetooth'], self.sudo_password)
-                            if success:
-                                actions.append('إيقاف Bluetooth')
-                                power_saved += 5
-                except:
-                    pass
-                
-                if actions:
-                    result['details'] = 'تم: ' + ' • '.join(actions)
-                    result['power_saved'] = power_saved
-                else:
-                    result['details'] = 'تم تحسين إعدادات الطاقة الأساسية'
-                    result['power_saved'] = 5
-            
-            elif IS_WINDOWS:
-                # تفعيل خطة الطاقة الموفرة
-                try:
-                    # تفعيل خطة توفير الطاقة
-                    subprocess.run(['powercfg', '/setactive', 'a1841308-3541-4fab-bc81-f71556f20b4a'],
-                                 check=False, capture_output=True, timeout=5)
-                    
-                    # خفض سطوع الشاشة
-                    subprocess.run(['powershell', '-Command',
-                                  '(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,50)'],
-                                 check=False, capture_output=True, timeout=5)
-                    
-                    result['details'] = 'تم تفعيل خطة توفير الطاقة وخفض السطوع'
-                    result['power_saved'] = 15
-                except:
-                    result['details'] = 'تم تحسين إعدادات الطاقة'
-                    result['power_saved'] = 8
-            
-            result['success'] = True
-            
-        except Exception as e:
-            result['details'] = f'خطأ: {str(e)}'
-            logger.error(f"خطأ في إعدادات الطاقة: {e}")
-        
-        return result
-    
-    def _clean_temp_files(self) -> Dict:
-        """تنظيف الملفات المؤقتة"""
-        result = {'name': 'تنظيف الملفات المؤقتة', 'success': False, 'details': '', 'power_saved': 0}
-        
-        try:
-            cleaned_size = 0
-            
-            if IS_LINUX:
-                temp_dirs = ['/tmp', '/var/tmp', str(Path.home() / '.cache')]
-            else:
-                temp_dirs = [os.environ.get('TEMP', ''), os.environ.get('TMP', '')]
-            
-            for temp_dir in temp_dirs:
-                if temp_dir and Path(temp_dir).exists():
-                    try:
-                        # حساب الحجم قبل التنظيف
-                        for item in Path(temp_dir).iterdir():
-                            try:
-                                if item.is_file():
-                                    size = item.stat().st_size
-                                    # حذف الملفات القديمة فقط (أكثر من يوم)
-                                    # ملاحظة: كان هنا Path.ctime - خطأ TypeError
-                                    # كان يجعل التنظيف يفشل بصمت لكل ملف
-                                    if (time.time() - item.stat().st_mtime) > 86400:
-                                        item.unlink()
-                                        cleaned_size += size
-                            except OSError:
-                                continue
-                    except OSError:
-                        continue
-            
-            cleaned_mb = cleaned_size / (1024 * 1024)
-            result['details'] = f'تم تنظيف {cleaned_mb:.1f} MB'
-            result['power_saved'] = min(cleaned_mb * 0.01, 5)
-            result['success'] = True
-            
-        except Exception as e:
-            result['details'] = f'خطأ: {str(e)}'
-            logger.error(f"خطأ في تنظيف الملفات: {e}")
-        
-        return result
-    
-    def _optimize_network(self) -> Dict:
-        """تحسين استهلاك الشبكة"""
-        result = {'name': 'تحسين الشبكة', 'success': False, 'details': '', 'power_saved': 0}
-        
-        try:
-            # إيقاف الاتصالات غير النشطة
-            connections = psutil.net_connections()
-            idle_connections = [c for c in connections if c.status == 'ESTABLISHED']
-            
-            result['details'] = f'تم تحسين {len(idle_connections)} اتصال'
-            result['power_saved'] = len(idle_connections) * 0.1
-            result['success'] = True
-            
-        except Exception as e:
-            result['details'] = f'خطأ: {str(e)}'
-            logger.error(f"خطأ في تحسين الشبكة: {e}")
-        
-        return result
-    
-    def _optimize_disk(self) -> Dict:
-        """تحسين استخدام القرص"""
-        result = {'name': 'تحسين القرص', 'success': False, 'details': '', 'power_saved': 0}
-        
-        try:
-            disk_usage = psutil.disk_usage('/')
-            
-            if IS_LINUX:
-                # تنظيف apt cache
-                try:
-                    subprocess.run(['sudo', 'apt-get', 'clean'], 
-                                 check=False, capture_output=True, timeout=30)
-                    result['details'] = 'تم تنظيف ذاكرة التخزين المؤقت'
-                except:
-                    result['details'] = 'تم تحسين القرص'
-            
-            elif IS_WINDOWS:
-                # تشغيل Disk Cleanup
-                try:
-                    subprocess.run(['cleanmgr', '/sagerun:1'], 
-                                 check=False, capture_output=True, timeout=5)
-                    result['details'] = 'تم بدء تنظيف القرص'
-                except:
-                    result['details'] = 'تم تحسين القرص'
-            
-            result['power_saved'] = 3
-            result['success'] = True
-            
-        except Exception as e:
-            result['details'] = f'خطأ: {str(e)}'
-            logger.error(f"خطأ في تحسين القرص: {e}")
-        
-        return result
-    
-    def get_system_status(self) -> Dict:
-        """الحصول على حالة النظام"""
-        try:
-            status = {
-                'cpu_percent': psutil.cpu_percent(interval=1),
-                'memory_percent': psutil.virtual_memory().percent,
-                'disk_percent': psutil.disk_usage('/').percent,
-                'process_count': len(psutil.pids()),
-                'network_connections': len(psutil.net_connections())
+                    logger.error(f"محسّن: فشل {step.__name__}: {e}")
+                    errors.append(f'{step.__name__}: {e}')
+
+            reports.extend(self._declared_refusals())
+
+            applied = [report for report in reports if report.success]
+            measured_saving = None
+            if applied and draw_before is not None:
+                time.sleep(MEASURE_SETTLE_SECONDS)
+                draw_after = self._read_draw_watts()
+                if draw_after is not None:
+                    measured_saving = round(max(0.0, draw_before - draw_after), 2)
+
+            self.total_optimizations += 1
+            if measured_saving:
+                self.power_saved_total += measured_saving
+            self.success_rate = 100 if applied or not errors else max(
+                0, self.success_rate - 5)
+
+            record = {
+                'timestamp': datetime.now().isoformat(timespec='seconds'),
+                'mode': optimization_mode,
+                'applied': [report.key for report in applied],
+                'declined': {report.key: report.reason
+                             for report in reports if report.declined},
+                'draw_before': draw_before,
+                'measured_saving': measured_saving,
+                'duration': round(time.time() - started, 2),
             }
-            
-            # إضافة معلومات البطارية إذا كانت متوفرة
-            try:
-                battery = psutil.sensors_battery()
-                if battery:
-                    status['battery_percent'] = battery.percent
-                    status['is_charging'] = battery.power_plugged
-                else:
-                    status['battery_percent'] = 50  # افتراضي
-                    status['is_charging'] = False
-            except:
-                status['battery_percent'] = 50
-                status['is_charging'] = False
-            
-            return status
-        except Exception as e:
-            logger.error(f"خطأ في قراءة حالة النظام: {e}")
-            return {
-                'cpu_percent': 0,
-                'memory_percent': 0,
-                'disk_percent': 0,
-                'process_count': 0,
-                'network_connections': 0,
-                'battery_percent': 50,
-                'is_charging': False
-            }
-    
-    def _perform_ai_analysis(self) -> Dict:
-        """تحليل ذكي قبل التحسين"""
-        analysis = {
-            'recommendations': [],
-            'predicted_improvement': 0,
-            'intelligence_score': 0,
-            'priority_actions': []
-        }
-        
-        try:
-            if not self.ai_engine:
-                return analysis
-            
-            # الحصول على حالة النظام الحالية
-            system_status = self.get_system_status()
-            
-            # تحليل الذكاء الاصطناعي
-            cpu_usage = system_status.get('cpu_percent', 0)
-            memory_usage = system_status.get('memory_percent', 0)
-            
-            # توصيات ذكية بناءً على الحالة
-            if memory_usage > 80:
-                analysis['recommendations'].append("الذاكرة مكتظة - سيتم تنظيف عميق")
-                analysis['predicted_improvement'] += 15
-                analysis['priority_actions'].append('memory_deep_clean')
-            
-            if cpu_usage > 70:
-                analysis['recommendations'].append("المعالج محمّل - سيتم تحسين العمليات")
-                analysis['predicted_improvement'] += 12
-                analysis['priority_actions'].append('cpu_optimization')
-            
-            # تحليل أنماط الاستخدام من الذكاء الاصطناعي
-            usage_stats = self.ai_engine.get_usage_statistics()
-            heavy_hours = usage_stats.get('heavy_usage_hours', [])
-            current_hour = datetime.now().hour
-            
-            if current_hour in heavy_hours:
-                analysis['recommendations'].append("وقت استخدام مكثف - تحسين متقدم")
-                analysis['predicted_improvement'] += 8
-                analysis['priority_actions'].append('intensive_optimization')
-            
-            # حساب درجة الذكاء
-            analysis['intelligence_score'] = min(100, len(analysis['recommendations']) * 25 + 
-                                               len(analysis['priority_actions']) * 15)
-            
-        except Exception as e:
-            logger.error(f"خطأ في التحليل الذكي: {e}")
-        
-        return analysis
-    
-    def get_optimization_stats(self) -> Dict:
-        """الحصول على إحصائيات التحسين"""
-        return {
-            'total_optimizations': self.total_optimizations,
-            'success_rate': self.success_rate,
-            'total_power_saved': self.power_saved_total,
-            'average_power_saved': self.power_saved_total / max(1, self.total_optimizations),
-            'optimization_history': self.optimization_history[-10:],
-            'smart_optimization_enabled': self.smart_optimization_enabled
-        }
-    def _record_optimization_results(self, results: Dict):
-        """تسجيل نتائج التحسين للتعلم"""
-        try:
-            optimization_record = {
-                'timestamp': datetime.now().isoformat(),
-                'success': results['success'],
-                'power_saved': results['power_saved'],
-                'actions_count': len(results['actions']),
-                'optimization_level': results.get('optimization_level', 'basic'),
-                'intelligence_score': results.get('intelligence_score', 0)
-            }
-            
-            self.optimization_history.append(optimization_record)
-            
-            # الاحتفاظ بآخر 100 تحسين
+            self.optimization_history.append(record)
             if len(self.optimization_history) > 100:
                 self.optimization_history = self.optimization_history[-100:]
-            
-            # تحديث بيانات التعلم
-            if self.ai_engine:
-                self.ai_engine.learning_data['optimization_history'] = self.optimization_history[-50:]
-                self.ai_engine.save_learning_data()
-            
-        except Exception as e:
-            logger.error(f"خطأ في تسجيل نتائج التحسين: {e}")
-    
-    def _clean_temp_files_smart(self) -> Dict:
-        """تنظيف ذكي للملفات المؤقتة - نسخة محسّنة"""
-        return self._clean_temp_files()
-    
-    def _optimize_network_ai(self) -> Dict:
-        """تحسين الشبكة بالذكاء الاصطناعي - نسخة محسّنة"""
-        return self._optimize_network()
-    
-    def _optimize_disk_intelligent(self) -> Dict:
-        """تحسين القرص بالذكاء الاصطناعي - نسخة محسّنة"""
-        return self._optimize_disk()
-    
-    def _clean_memory_intelligent(self) -> Dict:
-        """تنظيف الذاكرة بالذكاء الاصطناعي - نسخة محسّنة"""
-        return self._clean_memory()
-    
-    def _optimize_processes_ai(self) -> Dict:
-        """تحسين العمليات بالذكاء الاصطناعي - نسخة محسّنة"""
-        return self._optimize_processes()
-    
-    def _optimize_power_settings_intelligent(self) -> Dict:
-        """تحسين إعدادات الطاقة بالذكاء الاصطناعي - نسخة محسّنة"""
-        return self._optimize_power_settings()
-    
-    def _apply_personalized_optimizations(self) -> List[Dict]:
-        """تطبيق تحسينات شخصية بناءً على الذكاء الاصطناعي"""
-        personalized = []
-        
+
+            return {
+                'success': bool(applied) or not errors,
+                'actions': [report.as_dict() for report in reports],
+                'errors': errors,
+                # التوفير المقيس بالواط، أو None إذا لم يوفّره العتاد
+                'power_saved': measured_saving or 0.0,
+                'power_saved_measured': measured_saving is not None,
+                'draw_before': draw_before,
+                'applied_count': len(applied),
+                'declined_count': sum(1 for r in reports if r.declined),
+                'reversible': all(report.reversible for report in applied),
+                'optimization_level': optimization_mode,
+                'ai_recommendations': self._ai_recommendations(),
+                'personalized_actions': [],
+                'can_restore': self.tuner.has_pending_restore() or bool(self._throttled),
+            }
+        finally:
+            self.is_optimizing = False
+
+    def _ai_recommendations(self) -> List[str]:
+        """توصيات المحرك المتعلّم إن وُجد، بلا اختلاق عند غيابه"""
+        if self.ai_engine is None:
+            return []
         try:
-            if not self.ai_engine:
-                return personalized
-            
-            # الحصول على إحصائيات الاستخدام
-            usage_stats = self.ai_engine.get_usage_statistics()
-            
-            # تحسينات شخصية بناءً على الأنماط
-            heavy_hours = usage_stats.get('heavy_usage_hours', [])
-            current_hour = datetime.now().hour
-            
-            if current_hour in heavy_hours:
-                personalized.append({
-                    'name': 'تحسين وقت الذروة',
-                    'details': 'تم تطبيق تحسينات خاصة لوقت الاستخدام المكثف',
-                    'power_saved': 8
-                })
-            
-            # تحسين بناءً على نمط الشحن
-            charge_pattern = usage_stats.get('typical_charge_start', 0)
-            if charge_pattern > 0 and charge_pattern < 30:
-                personalized.append({
-                    'name': 'تحسين نمط الشحن',
-                    'details': 'تم تطبيق تحسينات للشحن من مستويات منخفضة',
-                    'power_saved': 5
-                })
-            
-            # تحسين بناءً على كثافة الاستخدام
-            usage_intensity = usage_stats.get('usage_intensity', 0)
-            if usage_intensity > 2:
-                personalized.append({
-                    'name': 'تحسين الاستخدام المكثف',
-                    'details': 'تم تطبيق تحسينات للاستخدام عالي الكثافة',
-                    'power_saved': 10
-                })
-            
+            status = self.get_system_status()
+            if hasattr(self.ai_engine, 'get_optimization_recommendations'):
+                items = self.ai_engine.get_optimization_recommendations(
+                    status.get('battery_percent', 50),
+                    status.get('is_charging', False))
+                return [str(item) for item in list(items)[:3]]
         except Exception as e:
-            logger.error(f"خطأ في التحسينات الشخصية: {e}")
-        
-        return personalized
+            logger.debug(f"محسّن: تعذّرت قراءة التوصيات: {e}")
+        return []
+
+    # ── التراجع ─────────────────────────────────────────────
+
+    def restore(self) -> Dict:
+        """
+        إرجاع كل ما غيّرته الجولات السابقة: السطوع وأولويات الإدخال/الإخراج.
+        تُستدعى بزر صريح وعند الإغلاق النظيف.
+        """
+        results = [result.as_dict() for result in self.tuner.restore_all()]
+
+        restored_processes = 0
+        for pid, (ioclass, value) in list(self._throttled.items()):
+            try:
+                psutil.Process(pid).ionice(ioclass, value)
+                restored_processes += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError, OSError):
+                pass
+            finally:
+                self._throttled.pop(pid, None)
+
+        if restored_processes:
+            results.append({'action': 'restore_throttle', 'applied': True,
+                            'reversible': True, 'reason': '',
+                            'detail': {'processes': restored_processes}})
+
+        return {'success': bool(results), 'results': results,
+                'message': t('opt.restore_done') if results
+                else t('opt.nothing_to_restore')}
+
+    def get_statistics(self) -> Dict:
+        """إحصاءات الجولات: أرقام مقيسة أو غائبة، لا مقدّرة بصمت"""
+        measured = [record['measured_saving'] for record in self.optimization_history
+                    if record.get('measured_saving')]
+        return {
+            'runs': self.total_optimizations,
+            'measured_runs': len(measured),
+            'watts_saved_total': round(self.power_saved_total, 2),
+            'watts_saved_average': round(sum(measured) / len(measured), 2)
+            if measured else None,
+            'pending_restore': self.tuner.has_pending_restore() or bool(self._throttled),
+            'recent': self.optimization_history[-10:],
+        }
+
+
+#: أسماء متوافقة مع الاستيرادات القديمة
+__all__ = ['BatteryOptimizer', 'ActionReport', 'THROTTLE_CPU_PERCENT']

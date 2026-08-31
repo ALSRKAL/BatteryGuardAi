@@ -23,7 +23,8 @@ import icons
 import theme
 from i18n import t
 from panel_widgets import (AdviceLayer, CapabilityStrip, ChargeWindowJaw,
-                           DiagnosticsPanel, ResponsiveGrid, StatePlate)
+                           CollapsibleSection, DiagnosticsPanel, ResponsiveGrid,
+                           StatePlate)
 
 logger = logging.getLogger('BatteryGuard')
 
@@ -151,8 +152,12 @@ def _page() -> Tuple[QWidget, QVBoxLayout]:
 
 class StatusTab:
     """
-    أول مجال يفتح عليه المستخدم: حقل الحالة بالقراءة الأساسية والأثر،
-    ثم التوصية الواحدة أو الاثنتان الأهم. لا شيء آخر هنا حتى لا يتشتت.
+    أول ما يُفتح: القراءة الأساسية، والوقت المتبقي، والتوصية إن وُجدت.
+
+    `StatePlate` تعرض أصلاً السحب والحرارة والصحة والدورات وحالة الشاحن
+    والإجهاد بجانب الرقم الكبير. لوحة «ملخص الجهاز» التي كانت تحت التوصيات
+    كانت تعيد الأرقام نفسها بشرطات، فحُذف تكرارها وبقي ما لا تعرضه اللوحة
+    خلف قسم مطويّ.
     """
 
     @staticmethod
@@ -162,15 +167,33 @@ class StatusTab:
         parent.state_plate = StatePlate()
         layout.addWidget(parent.state_plate)
 
+        # الوقت المتبقي: القراءة الوحيدة التي لا تعرضها لوحة الحالة، وهي
+        # أكثر ما يسأل عنه المستخدم فعلاً
+        headline_plate = QFrame()
+        headline_plate.setProperty('role', 'plate')
+        headline_layout = QHBoxLayout(headline_plate)
+        headline_layout.setContentsMargins(theme.SPACE_4, theme.SPACE_3,
+                                           theme.SPACE_4, theme.SPACE_3)
+        headline_layout.setSpacing(theme.SPACE_3)
+        headline_layout.addWidget(_legend(t('status.time_to_empty')))
+        parent.time_remaining_label = create_styled_label(
+            '—', theme.SIZE_SECTION, theme.PHOSPHOR, mono=True)
+        parent.time_remaining_label.setStyleSheet(
+            theme.font_css(theme.SIZE_SECTION, 700, mono=True,
+                           color=theme.PHOSPHOR))
+        headline_layout.addWidget(parent.time_remaining_label)
+        headline_layout.addStretch(1)
+        layout.addWidget(headline_plate)
+
         advice_plate, advice_layout = _plate('advice.title')
         parent.advice_layer = AdviceLayer()
         parent.advice_layer.actionTriggered.connect(parent.handle_advice_action)
         advice_layout.addWidget(parent.advice_layer)
         layout.addWidget(advice_plate)
 
-        # ── ملخص الجهاز: يعمّر المساحة بحقائق لا بفراغ ──
-        summary_plate, summary_layout = _plate('summary.title')
-        summary_layout.addWidget(_measure_block(parent, [
+        # ── تفاصيل الجهاز: مطويّة، لأنها تُقرأ مرة لا كل جلسة ──
+        details = CollapsibleSection(t('summary.title'))
+        details.add(_measure_block(parent, [
             ('crosshair', 'summary.device', 'summary_device_label'),
             ('info', 'diag.device_mode', 'summary_mode_label'),
             ('shield', 'capability.title', 'summary_tier_label'),
@@ -180,7 +203,8 @@ class StatusTab:
             ('jaw', 'window.title', 'summary_window_label'),
             ('chart', 'summary.samples', 'summary_samples_label'),
         ], min_column_width=280))
-        layout.addWidget(summary_plate)
+        parent.device_details_section = details
+        layout.addWidget(details)
 
         layout.addStretch(1)
         return _scroll(page)
@@ -197,16 +221,27 @@ class ControlTab:
     def create(parent) -> QScrollArea:
         page, layout = _page()
 
+        supported = bool(parent.monitor.capability.can_control)
+
         # ── الأرض الثابتة: قدرات هذا الجهاز ──
         parent.capability_strip = CapabilityStrip()
         parent.capability_strip.remediationRequested.connect(parent.show_remediation)
         layout.addWidget(parent.capability_strip)
 
         # ── نافذة الشحن ──
-        window_plate, window_layout = _plate('window.title')
+        # على جهاز بلا مسار كتابة كانت اللوحة تعرض مقبضين نشطين وزراً أحمر
+        # «تطبيق على العتاد» وتحته سطر «غير مدعوم على هذا الجهاز». تحكّم يبدو
+        # جاهزاً ولا يعمل أسوأ من تحكّم غائب: الأول يجعل المستخدم يشكّ في
+        # جهازه، والثاني يقول الحقيقة. لذلك تُطوى اللوحة وتُعطَّل مفاتيحها.
+        if supported:
+            window_plate, window_layout = _plate('window.title')
+        else:
+            window_section = CollapsibleSection(t('window.title'))
+            window_plate, window_layout = window_section, window_section.body_layout
+            parent.charge_window_section = window_section
 
         parent.charge_window_jaw = ChargeWindowJaw()
-        parent.charge_window_jaw.set_supported(parent.monitor.capability.can_control)
+        parent.charge_window_jaw.set_supported(supported)
         window_layout.addWidget(parent.charge_window_jaw)
 
         controls = QHBoxLayout()
@@ -240,6 +275,12 @@ class ControlTab:
         controls.addWidget(parent.apply_window_button)
         window_layout.addLayout(controls)
 
+        if not supported:
+            for control in (parent.min_charge_slider, parent.max_charge_slider,
+                            parent.auto_charge_control, parent.apply_window_button):
+                control.setEnabled(False)
+                control.setToolTip(t('control.unsupported_tooltip'))
+
         parent.control_status_label = create_styled_label(t('control.inactive'),
                                                          theme.SIZE_LABEL, theme.INK_DIM)
         parent.control_status_label.setWordWrap(True)
@@ -249,33 +290,47 @@ class ControlTab:
                                                             theme.PHOSPHOR)
         parent.window_projection_label.setWordWrap(True)
         window_layout.addWidget(parent.window_projection_label)
-        layout.addWidget(window_plate)
 
         # ── خطوات المعالجة (تظهر فقط عند وجودها) ──
         parent.remediation_plate, remediation_layout = _plate('remedy.title')
         parent.remediation_body = QVBoxLayout()
         parent.remediation_body.setSpacing(theme.SPACE_2)
         remediation_layout.addLayout(parent.remediation_body)
-        layout.addWidget(parent.remediation_plate)
+
+        # الترتيب يتبع ما ينفع المستخدم: إن كان الضبط ممكناً فاللوحة أولاً،
+        # وإن كان الحدّ في BIOS فخطوات الوصول إليه هي الجواب لا لوحة معطّلة.
+        if supported:
+            layout.addWidget(window_plate)
+            layout.addWidget(parent.remediation_plate)
+        else:
+            layout.addWidget(parent.remediation_plate)
+            layout.addWidget(window_plate)
 
         # ── القياسات الحالية ──
-        measures_plate, measures_layout = _plate('capability.measurable')
-        measures_layout.addWidget(_measure_block(parent, [
-            ('clock', 'status.time_to_empty', 'time_remaining_label'),
-            ('bolt', 'status.draw', 'power_draw_label'),
-            ('pulse', 'health.soh', 'health_label'),
-            ('cycle', 'health.cycles', 'cycle_count_label'),
-            ('thermometer', 'status.temperature', 'temperature_label'),
-            ('plug', 'field.status', 'charging_status'),
-        ]))
-        layout.addWidget(measures_plate)
+        # حُذفت من هنا: كانت تكراراً حرفياً لما تعرضه `StatePlate` في مجال
+        # الحالة (السحب، الصحة، الدورات، الحرارة، حالة الشاحن). القيمة نفسها
+        # في موضعين ليست تأكيداً بل ازدحاماً، وتجعل المستخدم يشكّ أيّهما
+        # الأحدث. الوقت المتبقي — وهو الوحيد غير المكرَّر — انتقل إلى الحالة.
 
-        # ── المحسّن ──
+        # ── المحسّن: إجراءان فقط، والثاني يظهر عند وجود ما يُستعاد ──
         optimizer_plate, optimizer_layout = _plate('action.optimize')
+
+        optimizer_actions = QHBoxLayout()
+        optimizer_actions.setSpacing(theme.SPACE_3)
+
         parent.optimize_button = QPushButton(t('action.optimize'))
         parent.optimize_button.setIcon(icons.icon('gauge', 15, theme.INK))
         parent.optimize_button.clicked.connect(parent.run_optimization)
-        optimizer_layout.addWidget(parent.optimize_button)
+        optimizer_actions.addWidget(parent.optimize_button)
+
+        parent.restore_button = QPushButton(t('opt.restore_button'))
+        parent.restore_button.setProperty('role', 'quiet')
+        parent.restore_button.setIcon(icons.icon('refresh', 15, theme.INK_DIM))
+        parent.restore_button.clicked.connect(parent.restore_optimization)
+        parent.restore_button.setVisible(False)
+        optimizer_actions.addWidget(parent.restore_button)
+        optimizer_actions.addStretch(1)
+        optimizer_layout.addLayout(optimizer_actions)
 
         parent.optimize_status = create_styled_label('', theme.SIZE_LABEL, theme.INK_FAINT)
         parent.optimize_status.setWordWrap(True)
@@ -287,24 +342,59 @@ class ControlTab:
 
 
 # ═══════════════════════════════════════════════════════════
-# مجال التحليل
+# مجال التفاصيل: التحليل والسجل والتشخيص في أقسام تُفتح بالطلب
 # ═══════════════════════════════════════════════════════════
 
-class AnalysisTab:
-    """ما تعلّمه التطبيق من هذا الجهاز، وما يتوقّعه، وبأي ثقة"""
+class DetailsTab:
+    """
+    مجال واحد يضمّ ما كان ثلاثة مجالات منفصلة.
+
+    كانت اللوحة ستة مجالات، وثلاثة منها (التحليل، السجل، التشخيص) لا تُفتح
+    إلا عند سؤال محدد: «كم سيعيش هذا العتاد؟» أو «ماذا حدث الأسبوع الماضي؟».
+    مجال لا يُفتح كل جلسة لا يستحق تبويباً دائماً في أعلى النافذة، لكنه يستحق
+    عنواناً مقروءاً في مكان واحد متوقّع.
+
+    الأقسام مطويّة كلها عند البدء ما عدا التحليل: يُفتح واحد فقط حتى تبدأ
+    النافذة قصيرة ويقرّر المستخدم ما يوسّعه.
+    """
 
     @staticmethod
     def create(parent) -> QScrollArea:
         page, layout = _page()
 
-        advice_plate, advice_layout = _plate('advice.title')
-        parent.advice_layer_full = AdviceLayer()
-        parent.advice_layer_full.actionTriggered.connect(parent.handle_advice_action)
-        advice_layout.addWidget(parent.advice_layer_full)
-        layout.addWidget(advice_plate)
+        parent.details_sections = {}
 
-        wear_plate, wear_layout = _plate('health.annual_loss')
-        wear_layout.addWidget(_measure_block(parent, [
+        analysis = CollapsibleSection(t('tab.intelligence'), expanded=True)
+        DetailsTab._fill_analysis(parent, analysis)
+        parent.details_sections['analysis'] = analysis
+        layout.addWidget(analysis)
+
+        record = CollapsibleSection(t('tab.record'))
+        DetailsTab._fill_record(parent, record)
+        parent.details_sections['record'] = record
+        layout.addWidget(record)
+
+        scan = CollapsibleSection(t('diag.title'))
+        parent.diagnostics_panel = DiagnosticsPanel()
+        parent.diagnostics_panel.scanRequested.connect(parent.run_diagnostics)
+        parent.diagnostics_panel.exportRequested.connect(parent.export_diagnostics)
+        scan.add(parent.diagnostics_panel)
+        parent.details_sections['diagnostics'] = scan
+        layout.addWidget(scan)
+
+        layout.addStretch(1)
+        return _scroll(page)
+
+    # ── التحليل ─────────────────────────────────────────────
+
+    @staticmethod
+    def _fill_analysis(parent, section: CollapsibleSection) -> None:
+        """
+        ما تعلّمه التطبيق وما يتوقّعه. لوحة التوصيات المكرَّرة حُذفت: كانت
+        نفس `AdviceLayer` تُبنى مرتين وتُحدَّث بنفس الصفوف، فيرى المستخدم
+        التوصية ذاتها في مجالين ويحسبها توصيتين.
+        """
+        section.add(_measure_block(parent, [
             ('chart', 'record.calendar_loss', 'calendar_loss_label'),
             ('cycle', 'record.cyclic_loss', 'cyclic_loss_label'),
             ('gauge', 'status.stress', 'stress_label'),
@@ -312,15 +402,13 @@ class AnalysisTab:
             ('cycle', 'record.equivalent_cycles', 'equivalent_cycles_label'),
             ('battery', 'record.high_soc_hours', 'high_soc_hours_label'),
         ]))
-        layout.addWidget(wear_plate)
 
-        prediction_plate, prediction_layout = _plate('record.confidence')
         parent.prediction_text = create_styled_label(t('record.learning'),
-                                                     theme.SIZE_BODY, theme.INK_DIM)
+                                                    theme.SIZE_BODY, theme.INK_DIM)
         parent.prediction_text.setWordWrap(True)
-        prediction_layout.addWidget(parent.prediction_text)
+        section.add(parent.prediction_text)
 
-        prediction_layout.addWidget(_measure_block(parent, [
+        section.add(_measure_block(parent, [
             ('chart', 'record.samples', 'data_points_label'),
             ('crosshair', 'record.observed_days', 'patterns_found_label'),
             ('arrow_down', 'record.avg_drain', 'drain_rate_label'),
@@ -330,15 +418,18 @@ class AnalysisTab:
         ]))
 
         # حقول يقرؤها التحديث القديم؛ تبقى مخفية بلا تكرار بصري
-        for attr, text in (('efficiency_score_label', '—'),
-                           ('learning_iterations_label', '—'),
-                           ('prediction_accuracy_label', '—'),
-                           ('learning_progress_label', '—'),
-                           ('ai_maturity_label', '—'),
-                           ('personalization_label', '—')):
-            hidden = create_styled_label(text, theme.SIZE_LABEL, theme.INK_FAINT, mono=True)
+        for attr in ('efficiency_score_label', 'learning_iterations_label',
+                     'prediction_accuracy_label', 'learning_progress_label',
+                     'ai_maturity_label', 'personalization_label',
+                     'advice_layer_full'):
+            if attr == 'advice_layer_full':
+                # نفس طبقة التوصيات في مجال الحالة: مرجع واحد لا نسخة ثانية
+                setattr(parent, attr, parent.advice_layer)
+                continue
+            hidden = create_styled_label('—', theme.SIZE_LABEL, theme.INK_FAINT,
+                                         mono=True)
             hidden.setVisible(False)
-            prediction_layout.addWidget(hidden)
+            section.add(hidden)
             setattr(parent, attr, hidden)
 
         actions = QHBoxLayout()
@@ -347,69 +438,26 @@ class AnalysisTab:
         refresh_button.setIcon(icons.icon('refresh', 15, theme.INK))
         refresh_button.clicked.connect(parent.refresh_ai_analysis)
         actions.addWidget(refresh_button)
-
-        diagnostics_button = QPushButton(t('diag.title'))
-        diagnostics_button.setProperty('role', 'quiet')
-        diagnostics_button.setIcon(icons.icon('crosshair', 15, theme.INK_DIM))
-        diagnostics_button.clicked.connect(parent.show_diagnostics)
-        actions.addWidget(diagnostics_button)
         actions.addStretch(1)
-        prediction_layout.addLayout(actions)
-        layout.addWidget(prediction_plate)
+        section.add_layout(actions)
 
-        layout.addStretch(1)
-        return _scroll(page)
-
-
-# ═══════════════════════════════════════════════════════════
-# مجال التشخيص
-# ═══════════════════════════════════════════════════════════
-
-class DiagnosticsTab:
-    """فحص عميق لمنظومة الطاقة، يعمل ببطارية أو بلا بطارية"""
+    # ── السجل ───────────────────────────────────────────────
 
     @staticmethod
-    def create(parent) -> QScrollArea:
-        page, layout = _page()
-
-        parent.diagnostics_panel = DiagnosticsPanel()
-        parent.diagnostics_panel.scanRequested.connect(parent.run_diagnostics)
-        parent.diagnostics_panel.exportRequested.connect(parent.export_diagnostics)
-        layout.addWidget(parent.diagnostics_panel)
-
-        layout.addStretch(1)
-        return _scroll(page)
-
-
-# ═══════════════════════════════════════════════════════════
-# مجال السجل
-# ═══════════════════════════════════════════════════════════
-
-class RecordTab:
-    """الصحة المقروءة من العتاد، الأزمنة التراكمية، وسجل الأحداث"""
-
-    @staticmethod
-    def create(parent) -> QScrollArea:
-        page, layout = _page()
-
-        health_plate, health_layout = _plate('health.title')
+    def _fill_record(parent, section: CollapsibleSection) -> None:
         parent.health_progress = _progress_bar()
-        health_layout.addWidget(parent.health_progress)
+        section.add(parent.health_progress)
 
         parent.health_status_label = create_styled_label(t('health.unknown'),
-                                                         theme.SIZE_BODY, theme.INK_DIM)
-        health_layout.addWidget(parent.health_status_label)
+                                                        theme.SIZE_BODY, theme.INK_DIM)
+        parent.health_status_label.setWordWrap(True)
+        section.add(parent.health_status_label)
 
-        health_layout.addWidget(_measure_block(parent, [
+        section.add(_measure_block(parent, [
             ('battery', 'health.design_capacity', 'design_capacity_label'),
             ('battery', 'health.full_capacity', 'current_capacity_label'),
             ('alert', 'record.cyclic_loss', 'wear_level_label'),
             ('cycle', 'health.cycles', 'cycle_count_stats_label'),
-        ]))
-        layout.addWidget(health_plate)
-
-        totals_plate, totals_layout = _plate('record.totals')
-        totals_rows = [
             ('bolt', 'record.total_charge_time', 'total_charge_time_label'),
             ('arrow_down', 'record.total_discharge_time', 'total_discharge_time_label'),
             ('bolt', 'record.avg_power', 'avg_power_draw_label'),
@@ -419,16 +467,14 @@ class RecordTab:
             ('gauge', 'record.system_health', 'system_health_label'),
             ('gear', 'record.auto_opt_runs', 'auto_opt_count_label'),
             ('bolt', 'record.auto_opt_saved', 'auto_opt_power_saved_label'),
-        ]
-        totals_layout.addWidget(_measure_block(parent, totals_rows))
-        layout.addWidget(totals_plate)
+        ]))
 
-        log_plate, log_layout = _plate('record.events')
+        section.add(_legend(t('record.events')))
         parent.events_log = QTextEdit()
         parent.events_log.setReadOnly(True)
-        parent.events_log.setMinimumHeight(180)
+        parent.events_log.setMinimumHeight(160)
         parent.events_log.setFont(theme.font(theme.SIZE_LABEL, 500, mono=True))
-        log_layout.addWidget(parent.events_log)
+        section.add(parent.events_log)
 
         log_actions = QHBoxLayout()
         log_actions.setSpacing(theme.SPACE_3)
@@ -444,11 +490,7 @@ class RecordTab:
         export_button.clicked.connect(parent.export_log)
         log_actions.addWidget(export_button)
         log_actions.addStretch(1)
-        log_layout.addLayout(log_actions)
-        layout.addWidget(log_plate)
-
-        layout.addStretch(1)
-        return _scroll(page)
+        section.add_layout(log_actions)
 
 
 def _progress_bar():
@@ -490,7 +532,7 @@ class SettingsTab:
     def create(parent) -> QScrollArea:
         page, layout = _page()
 
-        # ── الإشعارات ──
+        # ── الأساسي: ثلاثة مفاتيح يفهمها كل مستخدم ──
         notif_plate, notif_layout = _plate('startup.notifications')
         parent.enable_notifications = _check(t('startup.notifications'))
         parent.enable_notifications.setChecked(True)
@@ -506,20 +548,6 @@ class SettingsTab:
             toggles.addWidget(box)
         toggles.addStretch(1)
         notif_layout.addLayout(toggles)
-
-        thresholds_grid = QGridLayout()
-        thresholds_grid.setHorizontalSpacing(theme.SPACE_4)
-        thresholds_grid.setVerticalSpacing(theme.SPACE_2)
-        for index, (key, attr, low, high, default) in enumerate(SettingsTab.ALERT_THRESHOLDS):
-            label = QLabel(t(key))
-            label.setFont(theme.font(theme.SIZE_LABEL, 500))
-            label.setStyleSheet(f"color: {theme.INK_DIM};")
-            spin = _spin(low, high, default)
-            setattr(parent, attr, spin)
-            row, col = index // 2, (index % 2) * 2
-            thresholds_grid.addWidget(label, row, col)
-            thresholds_grid.addWidget(spin, row, col + 1)
-        notif_layout.addLayout(thresholds_grid)
         layout.addWidget(notif_plate)
 
         # ── التشغيل ──
@@ -534,11 +562,31 @@ class SettingsTab:
             startup_layout.addWidget(box)
         layout.addWidget(startup_plate)
 
-        # ── التحسين التلقائي ──
-        auto_plate, auto_layout = _plate('action.optimize')
+        # ── المتقدم: عتبات بالأرقام. مطويّة لأن الافتراضات مشتقّة من مراجع
+        #    منشورة، ومن لا يعرف ما تعنيه العتبة لا يجوز أن يُدفع إلى تغييرها.
+        advanced = CollapsibleSection(t('settings.advanced'))
+        parent.advanced_settings_section = advanced
+
+        advanced.add(_legend(t('startup.alert_thresholds')))
+        thresholds_grid = QGridLayout()
+        thresholds_grid.setHorizontalSpacing(theme.SPACE_4)
+        thresholds_grid.setVerticalSpacing(theme.SPACE_2)
+        for index, (key, attr, low, high, default) in enumerate(SettingsTab.ALERT_THRESHOLDS):
+            label = QLabel(t(key))
+            label.setFont(theme.font(theme.SIZE_LABEL, 500))
+            label.setStyleSheet(f"color: {theme.INK_DIM};")
+            spin = _spin(low, high, default)
+            setattr(parent, attr, spin)
+            row, col = index // 2, (index % 2) * 2
+            thresholds_grid.addWidget(label, row, col)
+            thresholds_grid.addWidget(spin, row, col + 1)
+        advanced.add_layout(thresholds_grid)
+
+        advanced.add(_legend(t('action.optimize')))
         parent.enable_auto_optimization = _check(t('startup.auto_optimize'))
-        parent.enable_auto_optimization.stateChanged.connect(parent.on_auto_optimization_changed)
-        auto_layout.addWidget(parent.enable_auto_optimization)
+        parent.enable_auto_optimization.stateChanged.connect(
+            parent.on_auto_optimization_changed)
+        advanced.add(parent.enable_auto_optimization)
 
         modes = QHBoxLayout()
         modes.setSpacing(theme.SPACE_4)
@@ -550,7 +598,7 @@ class SettingsTab:
                     parent.opt_mode_scheduled):
             modes.addWidget(box)
         modes.addStretch(1)
-        auto_layout.addLayout(modes)
+        advanced.add_layout(modes)
 
         interval_row = QHBoxLayout()
         interval_row.setSpacing(theme.SPACE_3)
@@ -561,7 +609,7 @@ class SettingsTab:
             f"5 {t('unit.minute_short')}", theme.SIZE_LABEL, theme.INK_DIM, mono=True)
         interval_row.addWidget(parent.opt_interval_value_label)
         interval_row.addStretch(1)
-        auto_layout.addLayout(interval_row)
+        advanced.add_layout(interval_row)
 
         optimizer_grid = QGridLayout()
         optimizer_grid.setHorizontalSpacing(theme.SPACE_4)
@@ -575,8 +623,15 @@ class SettingsTab:
             row, col = index // 2, (index % 2) * 2
             optimizer_grid.addWidget(label, row, col)
             optimizer_grid.addWidget(spin, row, col + 1)
-        auto_layout.addLayout(optimizer_grid)
-        layout.addWidget(auto_plate)
+        advanced.add_layout(optimizer_grid)
+
+        reset_button = QPushButton(t('dialog.reset_ai_title'))
+        reset_button.setProperty('role', 'quiet')
+        reset_button.setIcon(icons.icon('refresh', 14, theme.INK_DIM))
+        reset_button.clicked.connect(parent.reset_ai_data)
+        advanced.add(reset_button)
+
+        layout.addWidget(advanced)
 
         save_button = QPushButton(t('startup.save'))
         save_button.setProperty('role', 'live')
@@ -589,5 +644,8 @@ class SettingsTab:
 
 
 #: أسماء متوافقة مع الاستدعاءات السابقة
-AITab = AnalysisTab
-StatsTab = RecordTab
+AnalysisTab = DetailsTab
+RecordTab = DetailsTab
+DiagnosticsTab = DetailsTab
+AITab = DetailsTab
+StatsTab = DetailsTab

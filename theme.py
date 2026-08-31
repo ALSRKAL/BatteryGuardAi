@@ -204,6 +204,31 @@ def legend_font(size: int = SIZE_LEGEND):
     return font(size, weight=600, tracking=TRACKING_LEGEND)
 
 
+def font_css(size: int = SIZE_BODY, weight: int = 500, mono: bool = False,
+             color: Optional[str] = None, tracking: Optional[float] = None) -> str:
+    """
+    نفس رموز الخط لكن كتصريحات CSS.
+
+    لازمة لا زائدة: ورقة أنماط التطبيق تحتوي `QWidget { font-size: 15px }`،
+    وقاعدة ورقة الأنماط في Qt تتجاوز `setFont()` على أي عنصر تُطبَّق عليه.
+    أي قراءة كبيرة تُضبط بـ `setFont` وحده تُرسم بحجم النص العادي بلا خطأ
+    ظاهر، وهذا ما جعل رقم التذكير يُرسم بحجم السطر العادي.
+
+    تُستخدم داخل `setStyleSheet` للعنصر نفسه، فتفوز بالخصوصية.
+    """
+    family = mono_family() if mono else arabic_family()
+    parts = [
+        f'font-family: "{family}"',
+        f'font-size: {size}px',
+        f'font-weight: {weight}',
+    ]
+    if color:
+        parts.append(f'color: {color}')
+    if tracking is not None:
+        parts.append(f'letter-spacing: {tracking}px')
+    return '; '.join(parts) + ';'
+
+
 # ═══════════════════════════════════════════════════════════
 # حالة الجهاز ← حقل اللون
 # ═══════════════════════════════════════════════════════════
