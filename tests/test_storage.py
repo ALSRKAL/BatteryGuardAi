@@ -12,6 +12,16 @@ from storage import (
 )
 
 
+def _write_repeatedly(path, index, failures):
+    """
+    كاتب يعمل في عملية منفصلة (لا خيط): سباق الملف المؤقت يظهر بين العمليات
+    فقط، لأن القفل داخل العملية يسلسل الخيوط ولا يُرى من عملية أخرى.
+    """
+    for iteration in range(40):
+        if not atomic_write_json(path, {'worker': index, 'iter': iteration}):
+            failures.append((index, iteration))
+
+
 class TestAtomicWrite:
     def test_write_and_read_roundtrip(self, isolated_data_dir):
         path = isolated_data_dir / 'data.json'
@@ -64,6 +74,36 @@ class TestAtomicWrite:
         data = read_json(path)
         assert isinstance(data, dict)
         assert 'writer' in data
+
+    def test_writes_from_two_processes_do_not_destroy_each_other(
+            self, isolated_data_dir):
+        """
+        عُثر على هذا العطل في سجل جهاز حقيقي: خدمة الخلفية ونسخة تعمل من
+        الطرفية كتبتا `battery_ai_data.json` معاً، فسقطت إحداهما بـ
+        `No such file or directory: ...json.tmp -> ...json` وخسرت كتابتها.
+
+        السبب أن اسم الملف المؤقت كان مشتركاً (`<name>.tmp`): استبدلت الأولى
+        الملف المؤقت الذي تكتبه الثانية. القفل داخل العملية لا يحمي من ذلك
+        لأنه لا يُرى من عملية أخرى، فالاسم يجب أن يكون فريداً لكل عملية.
+        """
+        import multiprocessing as mp
+
+        path = isolated_data_dir / 'cross_process.json'
+
+        with mp.Manager() as manager:
+            failures = manager.list()
+            procs = [mp.Process(target=_write_repeatedly,
+                                args=(path, i, failures))
+                     for i in range(4)]
+            for p in procs:
+                p.start()
+            for p in procs:
+                p.join(timeout=30)
+            assert list(failures) == [], f'كتابات فاشلة: {list(failures)}'
+
+        assert isinstance(read_json(path), dict)
+        # لا ملف مؤقت متبقٍّ باسم مشترك يمكن أن تتنازع عليه عمليتان
+        assert not (isolated_data_dir / 'cross_process.json.tmp').exists()
 
 
 class TestJsonStore:

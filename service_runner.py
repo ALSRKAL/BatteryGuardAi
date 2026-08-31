@@ -201,8 +201,14 @@ class BackgroundController(QObject):
             try:
                 self.window = self._build_window()
             except Exception as e:
+                # الرسالة تحمل نوع الخطأ ونصّه: كانت «تعذرت القراءة» وحدها،
+                # وهي لا تقول للمستخدم شيئاً يستطيع التصرّف به. أشهر سبب هنا
+                # أن الخدمة تعمل بشيفرة قديمة بعد تحديث الملفات، وعلاجه إعادة
+                # تشغيلها؛ ولا يُعرف ذلك من رسالة عامة.
                 logger.error(f"تعذّر بناء النافذة: {e}", exc_info=True)
-                self.tray.show_message(t('app.name'), t('diag.unreadable'))
+                self.tray.show_message(
+                    t('app.name'),
+                    t('service.window_failed', error=f'{type(e).__name__}: {e}'))
                 return
         self.window.show()
         self.window.activateWindow()

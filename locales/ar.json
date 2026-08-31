@@ -366,6 +366,7 @@
   "service.title": "التشغيل في الخلفية",
   "service.tray_missing": "صينية النظام غير متاحة: التطبيق يعمل بلا أيقونة.",
   "service.uninstall": "إزالة الخدمة",
+  "service.window_failed": "تعذّر بناء اللوحة: {error} — إن كنت حدّثت الملفات فأعد تشغيل الخدمة: systemctl --user restart batteryguard",
   "settings.advanced": "إعدادات متقدمة",
   "settings.attribution_enabled": "قياس استهلاك كل عملية",
   "settings.attribution_interval": "ثواني بين جولات القياس",

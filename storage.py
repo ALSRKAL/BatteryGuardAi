@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import threading
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -40,13 +41,21 @@ def _lock_for(path: Path) -> threading.RLock:
 def atomic_write_json(path: Path, data: Any, indent: int = 2) -> bool:
     """
     كتابة JSON بشكل ذري: يُكتب في ملف مؤقت ثم يُستبدل الملف الأصلي.
-    آمن ضد انقطاع الطاقة/الانهيار أثناء الكتابة، وآمن بين الخيوط.
+    آمن ضد انقطاع الطاقة/الانهيار أثناء الكتابة، وآمن بين الخيوط والعمليات.
+
+    اسم الملف المؤقت فريد لكل عملية وكل كتابة. كان مشتركاً (`<name>.tmp`)،
+    فحين تكتب عمليتان نفس الملف — خدمة الخلفية ونسخة تعمل من الطرفية — تستبدل
+    الأولى الملف المؤقت الذي تكتبه الثانية، فتفشل الثانية بـ
+    `No such file or directory: ...json.tmp -> ...json` وتخسر كتابتها. القفل
+    داخل العملية لا يحمي من ذلك لأنه لا يُرى من عملية أخرى.
     """
     path = Path(path)
     lock = _lock_for(path)
+    tmp_path: Optional[Path] = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + '.tmp')
+        tmp_path = path.with_suffix(
+            f'{path.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp')
         payload = json.dumps(data, ensure_ascii=False, indent=indent)
         with lock:
             with open(tmp_path, 'w', encoding='utf-8') as f:
@@ -57,11 +66,12 @@ def atomic_write_json(path: Path, data: Any, indent: int = 2) -> bool:
         return True
     except Exception as e:
         logger.error(f"خطأ في الكتابة الذرية لـ {path}: {e}")
-        # تنظيف الملف المؤقت عند الفشل
+        # تنظيف الملف المؤقت عند الفشل. `tmp_path` قد تبقى None إذا فشل إنشاء
+        # المجلد قبل تعيينها، وكان ذلك يرفع NameError داخل معالج الاستثناء.
         try:
-            if tmp_path.exists():
+            if tmp_path is not None and tmp_path.exists():
                 tmp_path.unlink()
-        except Exception:
+        except OSError:
             pass
         return False
 

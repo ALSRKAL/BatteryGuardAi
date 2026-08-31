@@ -366,6 +366,7 @@
   "service.title": "Background operation",
   "service.tray_missing": "System tray unavailable: running without an icon.",
   "service.uninstall": "Remove service",
+  "service.window_failed": "Could not build the panel: {error} — if you updated the files, restart the service: systemctl --user restart batteryguard",
   "settings.advanced": "Advanced settings",
   "settings.attribution_enabled": "Measure per-process power draw",
   "settings.attribution_interval": "Seconds between measurement rounds",
